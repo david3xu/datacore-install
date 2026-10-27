@@ -9,6 +9,9 @@
 #   DATACORE_INSTALL_ROOT   where versions are kept (default: ~/.datacore)
 #   DATACORE_HOME           runtime data directory (default: ~/.datacore-local)
 #   DATACORE_ACCEPT_EULA=1  skip the interactive licence prompt (CI)
+#   DATACORE_COMPOSE_PROJECT         compose project name (default: datacore-local)
+#   DATACORE_SKIP_CLIENT_REGISTRATION=1  do not touch AI client config (proof runs)
+#   DATACORE_SKIP_START=1   install and configure, but start no containers (proof runs)
 #
 # NOTE: step 3 (download) requires the release pipeline (work unit D1). Until a release is
 # published, this script fails at that step with a clear message. Every other step is live.
@@ -19,8 +22,15 @@ VERSION="${DATACORE_VERSION:-latest}"
 RELEASE_BASE="${DATACORE_RELEASE_BASE:-https://github.com/REPLACE_ME/datacore-install/releases}"
 INSTALL_ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
 DATA_HOME="${DATACORE_HOME:-$HOME/.datacore-local}"
-COMPOSE_PROJECT="datacore-local"
+COMPOSE_PROJECT="${DATACORE_COMPOSE_PROJECT:-datacore-local}"
 BIN_DIR="$INSTALL_ROOT/bin"
+
+# Resolve our own directory before anything cd's: $0 may be relative, and later steps change
+# the working directory. BUNDLE_DIR is the real versioned path; never drive the bundle through
+# the 'current' symlink, because its own tooling re-points that symlink from basename($PWD).
+SELF_DIR=""
+[ -f "$0" ] && SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || true
+BUNDLE_DIR=""
 
 # ---------------------------------------------------------------- output helpers
 
@@ -103,10 +113,18 @@ download_and_verify() {
 
   mkdir -p "$INSTALL_ROOT/versions"
   tar -xzf "$TMP/$archive" -C "$INSTALL_ROOT/versions"
-  BUNDLE_DIR=$(find "$INSTALL_ROOT/versions" -maxdepth 1 -name 'datacore-local-edition-*' -type d | sort -V | tail -1)
+  BUNDLE_DIR=$(find "$INSTALL_ROOT/versions" -maxdepth 1 -name 'datacore-local-edition-*' -type d | sort | tail -1)
   [ -n "$BUNDLE_DIR" ] || die "The archive did not contain a bundle directory."
-  ln -sfn "$BUNDLE_DIR" "$INSTALL_ROOT/current"
-  ok "installed to $INSTALL_ROOT/current"
+
+  # Write the pointer atomically, then prove it resolves to the version we just unpacked.
+  ln -sfn "$BUNDLE_DIR" "$INSTALL_ROOT/current.new"
+  mv -f "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
+  resolved=$(cd "$INSTALL_ROOT/current" 2>/dev/null && pwd -P || true)
+  [ "$resolved" = "$(cd "$BUNDLE_DIR" && pwd -P)" ] \
+    || die "The 'current' pointer does not resolve to the installed version." \
+           "expected $BUNDLE_DIR
+     resolved $resolved"
+  ok "installed $(basename "$BUNDLE_DIR")"
 }
 
 # ---------------------------------------------------------------- 4. licence
@@ -114,7 +132,7 @@ download_and_verify() {
 accept_eula() {
   [ "${DATACORE_ACCEPT_EULA:-0}" = 1 ] && { ok "licence accepted (DATACORE_ACCEPT_EULA)"; return; }
   [ -f "$INSTALL_ROOT/.eula-accepted" ] && { ok "licence already accepted"; return; }
-  eula="$INSTALL_ROOT/current/EULA.md"
+  eula="$BUNDLE_DIR/EULA.md"
   [ -f "$eula" ] && say "" && cat "$eula"
   [ -t 0 ] || die "Cannot prompt for licence acceptance when piped." "Re-run with DATACORE_ACCEPT_EULA=1 once you have read $eula"
   printf '\nAccept these terms? [y/N] '
@@ -127,8 +145,15 @@ accept_eula() {
 # ---------------------------------------------------------------- 5. configure + start
 
 prepare_env() {
-  cd "$INSTALL_ROOT/current"
+  cd "$BUNDLE_DIR"
   [ -f .env ] || cp .env.example .env
+
+  # DATACORE_HOME ships as a change-me placeholder; the installer owns it, the user never sees it.
+  if grep -q '^DATACORE_HOME=change-me' .env 2>/dev/null; then
+    tmp_env=$(mktemp)
+    sed "s|^DATACORE_HOME=change-me.*|DATACORE_HOME=$DATA_HOME|" .env > "$tmp_env" && mv "$tmp_env" .env
+  fi
+  mkdir -p "$DATA_HOME"
 
   # The bundle's preflight hard-fails without a worker project map, even though a minimal
   # install never reads it. Supply a valid default so the user is never asked to write JSON.
@@ -144,11 +169,11 @@ prepare_env() {
 }
 
 start_stack() {
-  cd "$INSTALL_ROOT/current"
+  cd "$BUNDLE_DIR"
   if [ -f "$DATA_HOME/.last-good-bundle" ]; then
-    ./start-datacore-local.sh >/dev/null 2>&1 || die "Datacore failed to start." "Run: $INSTALL_ROOT/current/doctor.sh"
+    ./start-datacore-local.sh >/dev/null 2>&1 || die "Datacore failed to start." "Run: $BUNDLE_DIR/doctor.sh"
   else
-    ./install-datacore-local.sh >/dev/null 2>&1 || die "Install failed." "Run: $INSTALL_ROOT/current/doctor.sh"
+    ./install-datacore-local.sh >/dev/null 2>&1 || die "Install failed." "Run: $BUNDLE_DIR/doctor.sh"
   fi
 
   port=$(grep '^DATACORE_HTTP_PORT=' .env | cut -d= -f2)
@@ -158,7 +183,7 @@ start_stack() {
     curl -fsS -m 3 "$RUNTIME_URL/health" >/dev/null 2>&1 && break
     i=$((i + 1)); sleep 1
   done
-  [ $i -lt 60 ] || die "Datacore started but never reported healthy." "Run: $INSTALL_ROOT/current/doctor.sh"
+  [ $i -lt 60 ] || die "Datacore started but never reported healthy." "Run: $BUNDLE_DIR/doctor.sh"
   ok "runtime healthy at $RUNTIME_URL"
 }
 
@@ -177,7 +202,11 @@ mcp_bundle_works() {
 }
 
 register_clients() {
-  tokens="$INSTALL_ROOT/current/generated/client-tokens.env"
+  if [ "${DATACORE_SKIP_CLIENT_REGISTRATION:-0}" = 1 ]; then
+    info "skipping client registration (DATACORE_SKIP_CLIENT_REGISTRATION)"
+    return
+  fi
+  tokens="$BUNDLE_DIR/generated/client-tokens.env"
   [ -f "$tokens" ] || { info "no client tokens generated; skipping client registration"; return; }
   # shellcheck disable=SC1090
   set -a; . "$tokens"; set +a
@@ -202,8 +231,8 @@ register_clients() {
     info "Claude Code not found — run 'datacore connect' after installing it"
   fi
 
-  if [ -d "$HOME/Library/Application Support/Claude" ] && [ -x "$INSTALL_ROOT/current/write-claude-desktop-config.sh" ]; then
-    "$INSTALL_ROOT/current/write-claude-desktop-config.sh" >/dev/null 2>&1 \
+  if [ -d "$HOME/Library/Application Support/Claude" ] && [ -x "$BUNDLE_DIR/write-claude-desktop-config.sh" ]; then
+    "$BUNDLE_DIR/write-claude-desktop-config.sh" >/dev/null 2>&1 \
       && { ok "registered with Claude Desktop"; REGISTERED="${REGISTERED:+$REGISTERED, }Claude Desktop"; } \
       || info "could not register with Claude Desktop"
   fi
@@ -218,10 +247,8 @@ install_command() {
   # Under `curl | sh` there is no script file: $0 is "sh", so dirname gives the user's CWD and a
   # stray file named datacore there would be installed. Only trust a sibling when $0 is a real file.
   _script_src=""
-  _self_dir=""
-  [ -f "$0" ] && _self_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || true
-  if [ -n "$_self_dir" ] && [ -f "${_self_dir}/datacore" ]; then
-    _script_src="${_self_dir}/datacore"
+  if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/datacore" ]; then
+    _script_src="$SELF_DIR/datacore"
   else
     info "datacore script not found locally — downloading from release"
     if [ "$VERSION" = latest ]; then _rel="$RELEASE_BASE/latest/download"
@@ -249,11 +276,15 @@ main() {
   step "Downloading";                download_and_verify
   step "Licence";                    accept_eula
   step "Configuring";                prepare_env
-  step "Starting";                   start_stack
+  if [ "${DATACORE_SKIP_START:-0}" = 1 ]; then
+    step "Starting"; info "skipped (DATACORE_SKIP_START)"; RUNTIME_URL="(not started)"
+  else
+    step "Starting"; start_stack
+  fi
   step "Connecting your AI clients"; register_clients
   step "Finishing";                  install_command
 
-  ver=$(basename "$(readlink "$INSTALL_ROOT/current")" | sed 's/^datacore-local-edition-//')
+  ver=$(basename "$BUNDLE_DIR" | sed 's/^datacore-local-edition-//')
   cat <<EOF
 
 ${B}✓ Datacore $ver is running${R}
