@@ -20,6 +20,14 @@ not_yet() {
   exit 2
 }
 
+run_lib_script() {
+  # Locate the lib/ directory relative to this script, then exec the named file.
+  _self=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || _self=""
+  _lib="${_self}/lib/$1"; shift
+  [ -f "$_lib" ] || die "lib/$1 not found alongside the datacore command. Re-run the installer."
+  exec sh "$_lib" "$@"
+}
+
 run_bundle_script() {
   verb="$1"; script="$2"; shift 2
   [ -d "$C" ] || die "Datacore is not installed. Run the installer: https://get.datacore.dev"
@@ -54,10 +62,12 @@ Lifecycle:
   update      upgrade in place, with automatic rollback on failure
   uninstall   remove everything, including AI client config entries
 
+Providers:
+  provider    configure a model API key (add/list/remove)
+
 Not yet available:
   connect     register Datacore with an AI client (D4)
   enable      enable optional feature profiles, e.g. workers (D5)
-  provider    configure a model API key (D7)
   worker      register a local AI CLI as a worker (D8)
 EOF
   exit 0
@@ -83,7 +93,7 @@ case "$verb" in
 
   connect)  not_yet connect  "D4" ;;
   enable)   not_yet enable   "D5" ;;
-  provider) not_yet provider "D7" ;;
+  provider) run_lib_script provider.sh "$@" ;;
   worker)   not_yet worker   "D8" ;;
 
   *) printf 'Unknown command: %s\n' "$verb" >&2; exit 2 ;;
