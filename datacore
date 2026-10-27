@@ -1,0 +1,90 @@
+#!/bin/sh
+# Datacore front door — wraps the bundle scripts installed under ~/.datacore/current.
+#
+# Usage:  datacore <verb> [args...]
+#
+# Environment overrides:
+#   DATACORE_INSTALL_ROOT   where versions are kept (default: ~/.datacore)
+
+set -eu
+
+ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
+C="$ROOT/current"
+
+# ---------------------------------------------------------------- helpers
+
+die() { printf '%s\n' "$1" >&2; exit 1; }
+
+not_yet() {
+  printf "datacore %s: not available yet (%s).\n" "$1" "$2" >&2
+  exit 2
+}
+
+run_bundle_script() {
+  verb="$1"; script="$2"; shift 2
+  [ -d "$C" ] || die "Datacore is not installed. Run the installer: https://get.datacore.dev"
+  if [ ! -f "$C/$script" ]; then
+    # $C is the 'current' symlink; resolve it so the message names the real version.
+    ver=$(basename "$(cd "$C" 2>/dev/null && pwd -P || printf '%s' "$C")")
+    die "$script is missing from $ver. Re-run the installer, or upgrade: datacore update"
+  fi
+  exec "$C/$script" "$@"
+}
+
+# ---------------------------------------------------------------- usage
+
+usage() {
+  cat <<'EOF'
+Usage: datacore <verb> [args...]
+
+Running the stack:
+  status      show running state and enabled features
+  start       start the Datacore stack
+  stop        stop the Datacore stack
+  logs        tail component logs (pass -f to follow)
+
+Diagnosing:
+  doctor      diagnose problems, with remediation steps
+
+Data:
+  backup      back up the Datacore data directory
+  restore     restore from a backup
+
+Lifecycle:
+  update      upgrade in place, with automatic rollback on failure
+  uninstall   remove everything, including AI client config entries
+
+Not yet available:
+  connect     register Datacore with an AI client (D4)
+  enable      enable optional feature profiles, e.g. workers (D5)
+  provider    configure a model API key (D7)
+  worker      register a local AI CLI as a worker (D8)
+EOF
+  exit 0
+}
+
+# ---------------------------------------------------------------- dispatch
+
+verb="${1:-}"
+[ $# -gt 0 ] && shift
+
+case "$verb" in
+  ''|-h|--help) usage ;;
+
+  status)    run_bundle_script status    status-datacore-local.sh    "$@" ;;
+  doctor)    run_bundle_script doctor    doctor.sh                   "$@" ;;
+  logs)      run_bundle_script logs      tail-datacore-local.sh      "$@" ;;
+  start)     run_bundle_script start     start-datacore-local.sh     "$@" ;;
+  stop)      run_bundle_script stop      stop-datacore-local.sh      "$@" ;;
+  backup)    run_bundle_script backup    backup-datacore-local.sh    "$@" ;;
+  restore)   run_bundle_script restore   restore-datacore-local.sh   "$@" ;;
+  update)    run_bundle_script update    update-datacore-local.sh    "$@" ;;
+  uninstall) run_bundle_script uninstall uninstall-datacore-local.sh "$@" ;;
+
+  connect)  not_yet connect  "D4" ;;
+  enable)   not_yet enable   "D5" ;;
+  provider) not_yet provider "D7" ;;
+  worker)   not_yet worker   "D8" ;;
+
+  *) printf 'Unknown command: %s\n' "$verb" >&2; exit 2 ;;
+esac

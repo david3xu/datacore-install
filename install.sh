@@ -213,25 +213,29 @@ register_clients() {
 
 install_command() {
   mkdir -p "$BIN_DIR"
-  cat > "$BIN_DIR/datacore" <<'CMD'
-#!/bin/sh
-# Datacore front door. Full verb set arrives with work unit D6.
-set -eu
-ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"; C="$ROOT/current"
-case "${1:-}" in
-  status)  exec "$C/status-datacore-local.sh" ;;
-  doctor)  shift; exec "$C/doctor.sh" "$@" ;;
-  logs)    shift; exec "$C/tail-datacore-local.sh" "$@" ;;
-  start)   exec "$C/start-datacore-local.sh" ;;
-  stop)    exec "$C/stop-datacore-local.sh" ;;
-  connect) exec "$C/connect-claude-code.sh" ;;
-  provider|worker|enable|update|uninstall)
-    printf "'datacore %s' is not available yet (work units D6-D8b).\n" "$1" >&2; exit 2 ;;
-  ''|-h|--help)
-    printf 'datacore <status|doctor|logs|start|stop|connect>\n'; exit 0 ;;
-  *) printf 'Unknown command: %s\n' "$1" >&2; exit 2 ;;
-esac
-CMD
+
+  # Prefer the script sitting next to install.sh (local run / dev); fall back to the release.
+  # Under `curl | sh` there is no script file: $0 is "sh", so dirname gives the user's CWD and a
+  # stray file named datacore there would be installed. Only trust a sibling when $0 is a real file.
+  _script_src=""
+  _self_dir=""
+  [ -f "$0" ] && _self_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || true
+  if [ -n "$_self_dir" ] && [ -f "${_self_dir}/datacore" ]; then
+    _script_src="${_self_dir}/datacore"
+  else
+    info "datacore script not found locally — downloading from release"
+    if [ "$VERSION" = latest ]; then _rel="$RELEASE_BASE/latest/download"
+    else _rel="$RELEASE_BASE/download/$VERSION"; fi
+    fetch "$_rel/datacore" "$BIN_DIR/datacore" \
+      || die "Could not download the datacore command script." \
+             "Check your network, or re-run the installer."
+    chmod +x "$BIN_DIR/datacore"
+    ok "installed the datacore command to $BIN_DIR"
+    case ":$PATH:" in *":$BIN_DIR:"*) ;; *) info "add to PATH:  export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
+    return
+  fi
+
+  cp "$_script_src" "$BIN_DIR/datacore"
   chmod +x "$BIN_DIR/datacore"
   ok "installed the datacore command to $BIN_DIR"
   case ":$PATH:" in *":$BIN_DIR:"*) ;; *) info "add to PATH:  export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
