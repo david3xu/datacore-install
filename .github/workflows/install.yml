@@ -1,0 +1,222 @@
+name: install
+
+# A fresh install is the whole product here, and it is the thing most easily broken by a change
+# that looks safe on a machine where Datacore is already installed. Every defect this repo has
+# shipped — the version pointer swap, the empty agent ids, the EULA marker, the login agent's PATH
+# — only reproduced on a box that had never seen Datacore. A GitHub-hosted runner is exactly that
+# box, every time, so the install runs here rather than on somebody's laptop.
+#
+# Two jobs on purpose:
+#   source     the repository as it stands, which is what a release will carry
+#   published  the documented one-liner, which is what users run today
+# They can disagree. install.sh is served from main and takes effect immediately; lib/*.sh ship as
+# release assets and lag until a release is cut. `published` is what tells you that gap is open.
+
+on:
+  push:
+    branches: [main]
+    paths: ['install.sh', 'datacore', 'lib/**', '.github/workflows/install.yml']
+  pull_request:
+    paths: ['install.sh', 'datacore', 'lib/**', '.github/workflows/install.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    name: install from this checkout
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The installer registers Datacore with the AI clients it finds, and verifies the connection
+      # by reading the entry back. No runner has the real CLI, so stand in for it: the stub records
+      # what it was asked to add and can answer `mcp get`, which is all the installer relies on.
+      # It doubles as the thing that makes claude-code count as an installed worker CLI.
+      - name: Stub the claude CLI
+        run: |
+          mkdir -p ~/bin ~/stub
+          cat > ~/bin/claude <<'STUB'
+          #!/bin/sh
+          ENT="$HOME/stub/entry.txt"
+          printf '%s\n' "$*" >> "$HOME/stub/claude-calls.log"
+          case "$1 $2" in
+            "mcp add")    shift 2; printf '%s\n' "$*" > "$ENT"; exit 0 ;;
+            "mcp remove") rm -f "$ENT"; exit 0 ;;
+            "mcp get")    [ -f "$ENT" ] || exit 1
+                          cat "$ENT"
+                          echo "To remove this server, run: claude mcp remove datacore -s user"
+                          exit 0 ;;
+          esac
+          exit 1
+          STUB
+          chmod +x ~/bin/claude
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Install
+        env:
+          DATACORE_ACCEPT_EULA: '1'
+        run: ./install.sh
+
+      # Everything below is an assertion, not a demonstration: the job has to fail when the
+      # installer silently does the wrong thing, which is the failure mode that got us here.
+      - name: The install is where it says it is
+        run: |
+          set -eu
+          test -L ~/.datacore/current
+          test -x ~/.datacore/bin/datacore
+          test -f ~/.datacore/data/.eula-accepted
+          grep -q "^DATACORE_HOME=$HOME/.datacore/data$" ~/.datacore/current/.env
+          # The fixed path both this installer and the bundle's own generator used to default to.
+          # Anything here means a second install on this machine would adopt the first one's data.
+          test ! -e ~/.datacore-local/postgres || echo "::warning::the bundle still creates ~/.datacore-local"
+
+      - name: Only the workers this machine can actually run are enabled
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import json, os, sys
+          gen = os.path.expanduser('~/.datacore/current/generated')
+          reg = json.load(open(f'{gen}/azure-worker-registry.json'))['workers']
+          cat = json.load(open(f'{gen}/azure-worker-catalogue.json'))['workers']
+
+          # An entry with no phases is an identity, not a dispatch target. The MCP operator is one,
+          # and it carries cli:"claude-code" like any worker — deleting it would take the client's
+          # MCP token with it, so assert it survived the prune.
+          dispatch = sorted(w['agent_id'] for w in reg if w.get('phases'))
+          identity = [w['agent_id'] for w in reg if not w.get('phases')]
+
+          # Only `claude` is stubbed, so only the claude-code families are installable. agy is
+          # excluded because the bundle's own catalogue flags it out of the default profile.
+          assert dispatch == ['claude-review@opus', 'claude-worker@sonnet'], dispatch
+          assert len(identity) == 1, identity
+          assert len(cat) >= 29, len(cat)
+          assert all('token' in w for w in cat), 'a catalogue entry lost its token'
+          print(f'enabled {dispatch}, catalogue holds {len(cat)}')
+          PY
+
+      - name: Enabling a worker whose CLI is missing says so
+        run: |
+          set -eu
+          # 2>&1 because the warning is on stderr and this has to fail if it stops being emitted.
+          out=$(~/.datacore/bin/datacore worker add codex 2>&1)
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -q "not on PATH"
+          printf '%s\n' "$out" | grep -q 'codex-worker@gpt-6-luna'
+
+      - name: prune returns to the lean default, and counts the new CLI
+        run: |
+          set -eu
+          printf '#!/bin/sh\necho codex 1.0\n' > ~/bin/codex && chmod +x ~/bin/codex
+          ~/.datacore/bin/datacore worker prune
+          python3 -c "
+          import json, os
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          got = sorted(w['agent_id'] for w in reg if w.get('phases'))
+          want = ['claude-review@opus', 'claude-worker@sonnet', 'codex-review@gpt-6-luna', 'codex-worker@gpt-6-luna']
+          assert got == want, (got, want)
+          print('lean set:', got)"
+
+      - name: One exact model can be added, and a family removed
+        run: |
+          set -eu
+          ~/.datacore/bin/datacore worker add codex-review@gpt-6-astra
+          ~/.datacore/bin/datacore worker remove codex-review
+          python3 -c "
+          import json, os
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          got = sorted(w['agent_id'] for w in reg if w.get('phases'))
+          assert got == ['claude-review@opus', 'claude-worker@sonnet', 'codex-worker@gpt-6-luna'], got
+          print('after remove:', got)"
+          # A removal must never destroy a token: the catalogue still has to be able to give it back.
+          ~/.datacore/bin/datacore worker add codex-review@gpt-6-astra
+
+      - name: doctor reports nothing blocking
+        run: |
+          set -eu
+          # A pipe into `tail` would hide doctor's exit code and make this step decorative, so
+          # capture the report and judge it. A missing worker CLI is expected on a runner and is
+          # not blocking; anything else is.
+          ~/.datacore/bin/datacore doctor > doctor.log 2>&1 || true
+          tail -3 doctor.log
+          blocking=$(grep ' FAIL ' doctor.log | grep -v 'bridge_dispatch:launcher:' || true)
+          if [ -n "$blocking" ]; then
+            printf '%s\n' "$blocking"
+            echo "::error::doctor reports a blocking failure"
+            exit 1
+          fi
+
+      - name: The AI client was registered, and the connection was verified
+        run: |
+          set -eu
+          test -f ~/stub/entry.txt
+          # CI logs on a public repo are world-readable. The token is local-only and dies with the
+          # runner, but it is still a credential, so it never reaches the log.
+          sed 's/Bearer [A-Za-z0-9_-]*/Bearer <redacted>/g' ~/stub/entry.txt
+          grep -q '127.0.0.1' ~/stub/entry.txt
+          grep -q 'X-Datacore-MCP-Tool-Bundle' ~/stub/entry.txt
+
+      - name: Uninstall leaves nothing running and no install tree
+        run: |
+          set -eu
+          ~/.datacore/bin/datacore uninstall --yes
+          test ! -e ~/.datacore/current
+          test "$(docker ps -aq | wc -l)" = 0
+          # The client entry has to go too: an entry pointing at a runtime that no longer exists
+          # makes the AI client fail on every call with nothing to explain why.
+          test ! -f ~/stub/entry.txt
+
+  published:
+    name: install from the published one-liner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Stub the claude CLI
+        run: |
+          mkdir -p ~/bin ~/stub
+          cat > ~/bin/claude <<'STUB'
+          #!/bin/sh
+          ENT="$HOME/stub/entry.txt"
+          case "$1 $2" in
+            "mcp add")    shift 2; printf '%s\n' "$*" > "$ENT"; exit 0 ;;
+            "mcp remove") rm -f "$ENT"; exit 0 ;;
+            "mcp get")    [ -f "$ENT" ] || exit 1
+                          cat "$ENT"
+                          echo "To remove this server, run: claude mcp remove datacore -s user"
+                          exit 0 ;;
+          esac
+          exit 1
+          STUB
+          chmod +x ~/bin/claude
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Install the way the README says to
+        env:
+          DATACORE_ACCEPT_EULA: '1'
+        run: curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh | sh
+
+      - name: It runs, and it registered a client
+        run: |
+          set -eu
+          test -f ~/stub/entry.txt
+          ~/.datacore/bin/datacore doctor > doctor.log 2>&1 || true
+          tail -3 doctor.log
+          blocking=$(grep ' FAIL ' doctor.log | grep -v 'bridge_dispatch:launcher:' || true)
+          [ -z "$blocking" ] || { printf '%s\n' "$blocking"; exit 1; }
+
+      # install.sh comes from main; lib/*.sh come from the latest release. So this job can be
+      # running new installer logic against an old helper, and the worker trim is the part that
+      # degrades. Report the gap instead of failing: the fix is cutting a release, not reverting.
+      - name: Report whether the released helper can trim the registry
+        run: |
+          set -eu
+          n=$(python3 -c "
+          import json, os
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          print(sum(1 for w in reg if w.get('phases')))")
+          echo "dispatchable workers after install: $n"
+          if [ "$n" -gt 4 ]; then
+            echo "::warning::the released lib/worker.sh cannot trim the registry ($n workers enabled) — cut a release carrying the current lib/worker.sh"
+          fi
