@@ -500,6 +500,56 @@ install_command() {
   case ":$PATH:" in *":$BIN_DIR:"*) ;; *) info "add to PATH:  export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
 }
 
+# ---------------------------------------------------------------- 7. autostart at login
+#
+# Without this, Datacore only runs when the user remembers to start it — and an AI client launched
+# while it is down cannot reach the MCP server for that entire session, with no way to recover but
+# restarting the client. So autostart is the default, not an extra.
+#
+# The bundle ships a launchd agent, but its plist hardcodes a PATH of homebrew and system
+# directories. Every bundle script is `exec bun`, and a machine that had no bun got a private copy
+# in $BIN_DIR, which is on none of those paths — so the agent would fail at every login with
+# "exec: bun: not found". Install it, then prepend the directories that actually hold bun and the
+# worker CLIs.
+install_login_agent() {
+  [ "${DATACORE_SKIP_LOGIN_AGENT:-0}" = 1 ] && { info "autostart skipped (DATACORE_SKIP_LOGIN_AGENT)"; return 0; }
+  if [ "$PLATFORM_OS" != darwin ]; then
+    info "autostart at login is macOS-only here; start it yourself with: datacore start"
+    return 0
+  fi
+  _agent="$BUNDLE_DIR/install-macos-login-agent.sh"
+  [ -x "$_agent" ] || { info "this bundle ships no login agent; start with: datacore start"; return 0; }
+
+  _plist="$HOME/Library/LaunchAgents/com.datacore.local-edition.plist"
+  _alog="${TMPDIR:-/tmp}/datacore-login-agent.$$.log"
+  if ! ( cd "$BUNDLE_DIR" && "$_agent" ) >"$_alog" 2>&1; then
+    warn "could not install the login agent; start Datacore yourself with: datacore start"
+    info "$(tail -2 "$_alog" | tr '\n' ' ')"
+    rm -f "$_alog"; return 0
+  fi
+  rm -f "$_alog"
+
+  if [ -f "$_plist" ] && command -v plutil >/dev/null 2>&1; then
+    _bun=$(command -v bun 2>/dev/null || true)
+    [ -n "$_bun" ] && _bundir=$(dirname "$_bun") || _bundir="$BIN_DIR"
+    _oldpath=$(plutil -extract EnvironmentVariables.PATH raw "$_plist" 2>/dev/null || true)
+    [ -n "$_oldpath" ] || _oldpath="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    case ":$_oldpath:" in
+      *":$_bundir:"*) ;;
+      *)
+        if plutil -replace EnvironmentVariables.PATH -string "$_bundir:$HOME/.local/bin:$_oldpath" "$_plist" 2>/dev/null; then
+          _uid=$(id -u)
+          launchctl bootout "gui/$_uid" "$_plist" >/dev/null 2>&1 || true
+          launchctl bootstrap "gui/$_uid" "$_plist" >/dev/null 2>&1 || true
+        else
+          warn "could not add $_bundir to the login agent PATH; it may fail to start at login"
+        fi
+        ;;
+    esac
+  fi
+  ok "starts automatically at login (remove it with: datacore uninstall)"
+}
+
 # ---------------------------------------------------------------- main
 
 main() {
@@ -514,7 +564,7 @@ main() {
     step "Starting"; start_stack
   fi
   step "Connecting your AI clients"; register_clients
-  step "Finishing";                  install_command
+  step "Finishing";                  install_command; install_login_agent
 
   ver=$(basename "$BUNDLE_DIR" | sed 's/^datacore-local-edition-//')
   cat <<EOF

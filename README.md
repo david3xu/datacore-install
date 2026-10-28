@@ -54,7 +54,8 @@ run Docker's post-install step — the installer tells you the command.
 5. Shows the licence terms and records your acceptance
 6. Starts Datacore and waits until it reports healthy
 7. Registers Datacore with every AI client it finds, and **verifies the connection works**
-8. Prints one next step
+8. On macOS, sets Datacore to **start automatically at login**
+9. Prints one next step
 
 Nothing is hand-edited. You will not be asked to open a file in an editor.
 
@@ -73,6 +74,20 @@ Nothing is hand-edited. You will not be asked to open a file in an editor.
 
 A minimal install is a complete product: memory, tasks and search inside your AI client. Model
 execution is opt-in and configured later, only if you want it.
+
+### Starting at login
+
+On macOS the installer registers a login agent, so Datacore is already running the next time you
+open your AI client. This matters more than it sounds: an AI client started while Datacore is down
+cannot reach it for that whole session, and the only cure is restarting the client.
+
+```bash
+DATACORE_SKIP_LOGIN_AGENT=1 ...   # install without it
+datacore stop / datacore start    # control it by hand at any time
+```
+
+`datacore uninstall` removes the agent. On Linux no agent is installed; run `datacore start`
+yourself, or add it to your own session startup.
 
 ## Commands
 
