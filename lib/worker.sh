@@ -29,11 +29,36 @@ REGISTRY="$GEN/azure-worker-registry.json"
 CATALOGUE="$GEN/azure-worker-catalogue.json"
 BUNDLE_CONFIG="$ROOT/current/support/install-config.js"
 
-# The bundle copies its generated registry to $DATACORE_HOME/runtime/worker-registry.json at install
-# time, and the host worker bridge reads *that* copy — DATACORE_WORKER_REGISTRY_PATH in its
-# environment points there. Editing only the bundle copy changes a file nothing dispatches from,
-# which is exactly the failure this command was written to fix, so keep both in step.
+# The registry this command edits is the bundle's generated copy, and it is not the only copy.
+#
+#   $DATA_HOME/runtime/worker-registry.json        the host worker bridge reads this one, and only
+#                                                  this one — DATACORE_WORKER_REGISTRY_PATH in its
+#                                                  environment points here
+#   compose-workspaces/<project>/generated/...     the copy `datacore doctor` compares against the
+#                                                  bundle's; when they differ doctor reports a
+#                                                  failure, which the installer treats as blocking
+#
+# Writing one copy and not the others is the whole defect this command was written to fix: it
+# printed a new worker list while the bridge kept dispatching from the old one. So every write goes
+# to all of them. Copies are mirrored only where they already exist — this never creates one.
 RUNTIME_REGISTRY="${DATACORE_WORKER_REGISTRY_PATH:-$DATA_HOME/runtime/worker-registry.json}"
+MIRRORS="$RUNTIME_REGISTRY"
+
+# The compose project names the workspace directory. The datacore dispatcher exports it after
+# reading COMPOSE_PROJECT_NAME out of the install's .env; resolve it again here so running this
+# script directly finds the same workspace the bundle's own scripts use.
+COMPOSE_PROJECT="${DATACORE_LOCAL_COMPOSE_PROJECT:-}"
+if [ -z "$COMPOSE_PROJECT" ] && [ -f "$ROOT/current/.env" ]; then
+  COMPOSE_PROJECT=$(grep '^COMPOSE_PROJECT_NAME=' "$ROOT/current/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
+fi
+[ -n "$COMPOSE_PROJECT" ] || COMPOSE_PROJECT="datacore-local"
+WORKSPACE_REGISTRY="$DATA_HOME/compose-workspaces/$COMPOSE_PROJECT/generated/azure-worker-registry.json"
+if [ -f "$WORKSPACE_REGISTRY" ]; then
+  MIRRORS="$MIRRORS
+$WORKSPACE_REGISTRY"
+fi
+
+export DC_REGISTRY_MIRRORS="$MIRRORS"
 export DC_RUNTIME_REGISTRY="$RUNTIME_REGISTRY"
 
 # ---------------------------------------------------------------- helpers
@@ -111,14 +136,19 @@ const write = (p, doc) => {
   try { chmodSync(p, 0o600); } catch {}
 };
 
-// The bridge dispatches from the runtime copy, not the bundle's generated one, so every write to the
-// registry has to land in both. Writing only the bundle copy is the failure mode this command
-// exists to fix: it would report success and change nothing the runtime reads.
+// The copies of the registry that have to move together with the one being edited: the runtime copy
+// the bridge dispatches from, and the compose workspace copy doctor compares. The shell works out
+// which of them exist; writing only the bundle's copy is the failure mode this command exists to
+// fix, because it reports success and changes nothing that dispatches.
 const RUNTIME = process.env.DC_RUNTIME_REGISTRY || "";
+const MIRRORS = (process.env.DC_REGISTRY_MIRRORS || "")
+  .split("\n")
+  .map((p) => p.trim())
+  .filter((p) => p && p !== registryPath && existsSync(p));
+
 function writeRegistry(doc) {
   write(registryPath, doc);
-  if (!RUNTIME || RUNTIME === registryPath || !existsSync(RUNTIME)) return;
-  write(RUNTIME, doc);
+  for (const p of MIRRORS) write(p, doc);
 }
 // The bridge dispatches by phase, so an entry with no phases is an identity rather than a dispatch
 // target: the MCP operator is one, and it carries cli:"claude-code" like any worker, so testing the
@@ -214,18 +244,18 @@ if (cmd === "list") {
   // Report against the copy the bridge actually reads. A mismatch between the two means something
   // wrote one without the other — the bundle regenerating its copy on upgrade, or an older version
   // of this command — and it shows up as workers that are listed but never dispatched to.
-  if (RUNTIME && RUNTIME !== registryPath && existsSync(RUNTIME)) {
+  const ids = (ws) => new Set(ws.filter((w) => !isInfra(w)).map((w) => w.agent_id));
+  const mine = ids(registry.workers);
+  const stale = MIRRORS.filter((p) => {
     try {
-      const live = read(RUNTIME).workers || [];
-      const liveIds = new Set(live.filter((w) => !isInfra(w)).map((w) => w.agent_id));
-      const bundleIds = new Set(registry.workers.filter((w) => !isInfra(w)).map((w) => w.agent_id));
-      const drift = [...liveIds].filter((x) => !bundleIds.has(x)).concat([...bundleIds].filter((x) => !liveIds.has(x)));
-      if (drift.length) {
-        console.log(`  ! the runtime copy and the bundle copy disagree on ${drift.length} worker(s).`);
-        console.log(`    The bridge dispatches from ${RUNTIME}.`);
-        console.log("    Run: datacore worker prune   (rewrites both)");
-      }
-    } catch {}
+      const theirs = ids(read(p).workers || []);
+      return theirs.size !== mine.size || [...mine].some((x) => !theirs.has(x));
+    } catch { return false; }
+  });
+  if (stale.length) {
+    console.log("  ! another copy of the registry disagrees with this one:");
+    for (const p of stale) console.log(`    ${p}${p === RUNTIME ? "   (the bridge dispatches from this one)" : ""}`);
+    console.log("    Run: datacore worker prune   (rewrites every copy)");
   }
   const enabled = summarise(registry.workers);
   const avail = catalogue.workers.filter((w) => !isInfra(w) && w.token).length - enabled;
