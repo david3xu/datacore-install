@@ -16,10 +16,13 @@ PROVIDERS_DIR="$DATA_HOME/providers"
 
 # ---------------------------------------------------------------- output helpers
 
-die()  { printf '%s\n' "$1" >&2; exit 1; }
+# Prints every argument, one per line: a die() that printed only "$1" silently dropped the
+# explanation lines its callers pass, leaving the user a bare refusal and no remedy.
+die()  { while [ $# -gt 0 ]; do printf '%s\n' "$1" >&2; shift; done; exit 1; }
 say()  { printf '%s\n' "$*"; }
 info() { printf '  · %s\n' "$*"; }
 ok()   { printf '  ✓ %s\n' "$*"; }
+warn() { printf '  ! %s\n' "$*" >&2; }
 
 # ---------------------------------------------------------------- platform
 
@@ -34,20 +37,30 @@ store_key() {
     security add-generic-password -U -s datacore-provider -a "$name" -w "$(cat)" 2>/dev/null \
       || die "Keychain write failed. Try: security add-generic-password -U -s datacore-provider -a $name -w <key>"
   else
-    mkdir -p "$PROVIDERS_DIR"
+    mkdir -p "$PROVIDERS_DIR" || die "Could not create $PROVIDERS_DIR"
     chmod 700 "$PROVIDERS_DIR"
-    cat > "$PROVIDERS_DIR/$name.key"
+    cat > "$PROVIDERS_DIR/$name.key" \
+      || die "Could not write the key to $PROVIDERS_DIR/$name.key"
     chmod 600 "$PROVIDERS_DIR/$name.key"
+    # An empty file would read back as a valid-looking provider with no key.
+    [ -s "$PROVIDERS_DIR/$name.key" ] \
+      || die "The key file $PROVIDERS_DIR/$name.key came out empty; the key was not stored."
   fi
 }
 
+# Returns 0 only when no stored key for $name remains. The caller reports what is true, because
+# someone removing a provider is usually revoking a key: claiming a delete that did not happen
+# leaves a live secret behind a message saying it is gone.
 delete_key() {
   name="$1"
   if is_macos; then
     security delete-generic-password -s datacore-provider -a "$name" >/dev/null 2>&1 || true
-  else
-    rm -f "$PROVIDERS_DIR/$name.key"
+    # A locked keychain fails the delete. Ask again: absent is the only acceptable end state.
+    security find-generic-password -s datacore-provider -a "$name" >/dev/null 2>&1 && return 1
+    return 0
   fi
+  rm -f "$PROVIDERS_DIR/$name.key"
+  [ ! -e "$PROVIDERS_DIR/$name.key" ]
 }
 
 key_ref() {
@@ -60,7 +73,7 @@ write_config() {
   name="$1"; base_url="$2"; request_path="$3"; timeout_ms="$4"; model="$5"
   ref=$(key_ref)
   ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  mkdir -p "$PROVIDERS_DIR"
+  mkdir -p "$PROVIDERS_DIR" || die "Could not create $PROVIDERS_DIR"
   cat > "$PROVIDERS_DIR/$name.json" <<ENDJSON
 {
   "name": "$name",
@@ -275,9 +288,24 @@ cmd_remove() {
     exit 1
   fi
 
-  delete_key "$name"
+  key_gone=1
+  delete_key "$name" || key_gone=0
   rm -f "$cfg"
-  ok "removed provider '$name'"
+  if [ ! -e "$cfg" ] && [ "$key_gone" = 1 ]; then
+    ok "removed provider '$name' (config and stored key)"
+  elif [ "$key_gone" != 1 ]; then
+    warn "provider '$name' config removed, but the stored key could NOT be deleted."
+    if is_macos; then
+      say "  The key is still in your keychain. Remove it with:"
+      say "    security delete-generic-password -s datacore-provider -a $name"
+      say "  (If your keychain is locked, unlock it and run that, or re-run this command.)"
+    else
+      say "  The key file is still at $PROVIDERS_DIR/$name.key — remove it yourself."
+    fi
+    exit 1
+  else
+    die "Could not remove $cfg; provider '$name' is still configured."
+  fi
 }
 
 # ---------------------------------------------------------------- usage

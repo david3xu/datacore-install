@@ -18,7 +18,10 @@ REPO="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 RELEASE_URL="${RELEASE_URL:-https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh}"
 # Pin the bundle. install.sh defaults DATACORE_VERSION to "latest", so an unpinned proof
 # tests whatever happens to be published at the moment it runs -- which is not a proof.
-DATACORE_VERSION="${DATACORE_VERSION:-v0.1.78}"
+# Derived from the installer's own pin rather than repeated, so the proof always names the
+# release the installer will actually fetch.
+_pin=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' "$(dirname "$0")/../install.sh" 2>/dev/null)
+DATACORE_VERSION="${DATACORE_VERSION:-${_pin:-v0.1.79}}"
 
 FAILURES=0
 PHASE=""
@@ -76,13 +79,23 @@ if [ "$SOURCE" = stage ]; then
     # The stage holds a snapshot of the helper scripts, so a stage built before the last edit
     # silently tests old code -- which is exactly how a fix can look like it did not work.
     # Refresh them from the working tree every run.
-    for h in worker.sh provider.sh uninstall.sh; do
-        [ -f "$REPO/lib/$h" ] && cp "$REPO/lib/$h" "$STAGE/latest/download/$h"
+    # Take the file list from install.sh's own CLI_FILES instead of repeating it here. Two
+    # hand-kept copies drifted once already: uninstall-desktop-entry.py was missing from the
+    # refresh list but present in the checksum line, so the stage kept serving a stale copy whose
+    # hash matched -- a fix could be edited, staged, proven, and never actually be under test.
+    _cli_files=$(sed -n 's/^CLI_FILES="\(.*\)"$/\1/p' "$REPO/install.sh")
+    [ -n "$_cli_files" ] || { printf 'could not read CLI_FILES from %s/install.sh\n' "$REPO" >&2; exit 1; }
+    _staged_names=''
+    for _rel in $_cli_files; do
+        _base=$(basename "$_rel")
+        [ -f "$REPO/$_rel" ] || { printf 'CLI_FILES names %s but it is not in the repo\n' "$_rel" >&2; exit 1; }
+        cp "$REPO/$_rel" "$STAGE/latest/download/$_base"
+        _staged_names="$_staged_names $_base"
     done
-    [ -f "$REPO/datacore" ] && cp "$REPO/datacore" "$STAGE/latest/download/datacore"
+    # shellcheck disable=SC2086
     (cd "$STAGE/latest/download" && shasum -a 256 \
         datacore-local-edition-amd64.tar.gz datacore-local-edition-arm64.tar.gz \
-        datacore provider.sh uninstall.sh worker.sh uninstall-desktop-entry.py > SHA256SUMS)
+        $_staged_names > SHA256SUMS)
     vm "rm -rf ~/stage && mkdir -p ~/stage/latest/download" >/dev/null 2>&1
     for f in "$STAGE"/latest/download/*; do
         base=$(basename "$f")

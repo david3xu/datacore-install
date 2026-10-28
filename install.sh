@@ -519,6 +519,14 @@ register_clients() {
   # shellcheck disable=SC1090
   set -a; . "$tokens"; set +a
 
+  # The token comes out of a generated file, so treat it as data rather than a given: under
+  # `set -u` a file that exists without this key aborts the whole install here, after the stack
+  # is already running, with nothing but "CLAUDE_CODE_TOKEN: unbound variable".
+  if [ -z "${CLAUDE_CODE_TOKEN:-}" ]; then
+    info "no Claude Code token in $tokens; skipping client registration"
+    return
+  fi
+
   BUNDLE=''
   for candidate in lifecycle_operator front_door; do
     if mcp_bundle_works "$CLAUDE_CODE_TOKEN" "$candidate"; then BUNDLE="$candidate"; break; fi
@@ -543,9 +551,22 @@ register_clients() {
   fi
 
   if [ -d "$HOME/Library/Application Support/Claude" ] && [ -x "$BUNDLE_DIR/write-claude-desktop-config.sh" ]; then
-    "$BUNDLE_DIR/write-claude-desktop-config.sh" >/dev/null 2>&1 \
-      && { ok "registered with Claude Desktop"; REGISTERED="${REGISTERED:+$REGISTERED, }Claude Desktop"; } \
-      || info "could not register with Claude Desktop"
+    _dcfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+    # RUNTIME_URL is "(not started)" when DATACORE_SKIP_START is set, so only match on the port
+    # when there is a real one to match.
+    _dport=${RUNTIME_URL##*:}
+    case "$_dport" in ''|*[!0-9]*) _dport='' ;; esac
+    if "$BUNDLE_DIR/write-claude-desktop-config.sh" >/dev/null 2>&1 \
+       && [ -f "$_dcfg" ] \
+       && grep -q '"datacore"' "$_dcfg" 2>/dev/null \
+       && { [ -z "$_dport" ] || grep -q "$_dport" "$_dcfg" 2>/dev/null; }; then
+      # Read the entry back: the writer can exit 0 having written to a config this install does
+      # not point at, which would leave the user told they are connected when nothing is.
+      ok "registered with Claude Desktop"
+      REGISTERED="${REGISTERED:+$REGISTERED, }Claude Desktop"
+    else
+      info "could not register with Claude Desktop"
+    fi
   fi
 }
 
@@ -601,6 +622,11 @@ install_command() {
   chmod +x "$BIN_DIR/datacore"
 
   if [ "$_downloaded" = 1 ]; then info "downloaded the datacore command from the release"; fi
+  [ -x "$BIN_DIR/datacore" ] || die "The datacore command did not land at $BIN_DIR/datacore." \
+      "Check that $BIN_DIR is writable, then re-run the installer."
+  "$BIN_DIR/datacore" --help >/dev/null 2>&1 \
+    || die "$BIN_DIR/datacore was installed but will not run." \
+           "Run it directly to see why:  $BIN_DIR/datacore --help"
   ok "installed the datacore command to $BIN_DIR"
   if [ -n "$_missing" ]; then
     warn "not installed: $_missing — the matching 'datacore' subcommand will say it is unavailable"

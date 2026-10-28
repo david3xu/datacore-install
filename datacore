@@ -50,7 +50,9 @@ fi
 
 # ---------------------------------------------------------------- helpers
 
-die() { printf '%s\n' "$1" >&2; [ $# -gt 1 ] && printf '%s\n' "$2" >&2; exit 1; }
+# Prints every argument, one per line. The earlier form printed only the first two and silently
+# dropped the rest, so a caller's remediation line could vanish.
+die() { while [ $# -gt 0 ]; do printf '%s\n' "$1" >&2; shift; done; exit 1; }
 
 not_yet() {
   printf 'datacore %s: not available yet. %s\n' "$1" "$2" >&2
@@ -72,20 +74,12 @@ run_installer() {
   command -v curl >/dev/null 2>&1 || die "curl is needed to fetch the installer."
   [ $# -eq 0 ] || die "datacore update takes no arguments."
   DATACORE_INSTALL_ROOT="$ROOT"; export DATACORE_INSTALL_ROOT
-
-# The bundle's scripts resolve their compose project from DATACORE_LOCAL_COMPOSE_PROJECT and default
-# it to "datacore-local". An install created with a different project name would otherwise have its
-# containers started under one name and stopped, inspected and upgraded under another.
-if [ -z "${DATACORE_LOCAL_COMPOSE_PROJECT:-}" ] && [ -f "$C/.env" ]; then
-  _proj=$(grep '^COMPOSE_PROJECT_NAME=' "$C/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
-  if [ -n "$_proj" ]; then DATACORE_LOCAL_COMPOSE_PROJECT="$_proj"; export DATACORE_LOCAL_COMPOSE_PROJECT; fi
-fi
   printf 'Fetching the installer from %s\n\n' "$INSTALLER_URL"
   _tmp=$(mktemp) || die "Could not create a temporary file."
   curl -fsSL --retry 3 -o "$_tmp" "$INSTALLER_URL" || { rm -f "$_tmp"; die "Could not download the installer from $INSTALLER_URL"; }
-  sh "$_tmp"; _status=$?
+  if sh "$_tmp"; then _status=0; else _status=$?; fi
   rm -f "$_tmp"
-  exit $_status
+  exit "$_status"
 }
 
 run_bundle_script() {

@@ -47,10 +47,13 @@ done
 
 # ---------------------------------------------------------------- output helpers
 
-die()  { printf '%s\n' "$1" >&2; exit 1; }
+# Prints every argument, one per line: a die() that printed only "$1" silently dropped the
+# explanation lines its callers pass, leaving the user a bare refusal and no remedy.
+die()  { while [ $# -gt 0 ]; do printf '%s\n' "$1" >&2; shift; done; exit 1; }
 say()  { printf '%s\n' "$*"; }
 info() { printf '  · %s\n' "$*"; }
 ok()   { printf '  ✓ %s\n' "$*"; }
+warn() { printf '  ! %s\n' "$*" >&2; }
 step() { printf '\n%s\n' "$*"; }
 
 confirm() {
@@ -70,7 +73,12 @@ DATA_HOME="${DATACORE_HOME:-}"
 if [ -z "$DATA_HOME" ] && [ -n "$BUNDLE_DIR" ] && [ -f "$BUNDLE_DIR/.env" ]; then
   DATA_HOME=$(grep '^DATACORE_HOME=' "$BUNDLE_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
 fi
-[ -n "$DATA_HOME" ] || DATA_HOME="$HOME/.datacore-local"
+# Deliberately no fallback. The old default was the fixed $HOME/.datacore-local, which several
+# installs could share -- so an uninstall whose own .env had gone missing would aim --purge-data
+# at whichever install owned that path. Guessing is fine for reporting and fatal for deleting, so
+# an unknown data directory is left empty and purge_data refuses rather than picking one.
+DATA_HOME_KNOWN=1
+[ -n "$DATA_HOME" ] || DATA_HOME_KNOWN=0
 
 [ -n "$BUNDLE_DIR" ] || [ -d "$ROOT" ] || die "Datacore is not installed at $ROOT; nothing to remove."
 
@@ -118,19 +126,32 @@ remove_client_entries() {
   if [ -f "$cfg" ] && grep -q '"datacore"' "$cfg" 2>/dev/null; then
     if command -v python3 >/dev/null 2>&1; then
       cp "$cfg" "$cfg.datacore-uninstall-backup"
-      if python3 "$LIB_DIR/uninstall-desktop-entry.py" "$cfg" "$port" >/dev/null 2>&1; then
-        removed="${removed:+$removed, }Claude Desktop"
-      else
-        rm -f "$cfg.datacore-uninstall-backup"
-        info "left the Claude Desktop entry alone; it does not point at this install"
-      fi
+      _derr=$(python3 "$LIB_DIR/uninstall-desktop-entry.py" "$cfg" "$port" 2>&1); _dstatus=$?
+      # The exit code matters: discarding the backup on *any* failure threw it away in the one
+      # case it is needed -- a rewrite that did not complete.
+      case "$_dstatus" in
+        0) removed="${removed:+$removed, }Claude Desktop"
+           # Keep the backup. We just edited a file holding the user's other MCP servers; if we
+           # matched the wrong entry, this is their only way back.
+           _desktop_backup="$cfg.datacore-uninstall-backup" ;;
+        1) rm -f "$cfg.datacore-uninstall-backup"
+           info "left the Claude Desktop entry alone; it does not point at this install" ;;
+        *) warn "could not remove the Claude Desktop entry from $cfg"
+           [ -n "$_derr" ] && say "  $_derr"
+           say "  Your configuration was backed up first: $cfg.datacore-uninstall-backup"
+           say "  Compare the two, then remove the \"datacore\" entry yourself." ;;
+      esac
     else
       info "python3 not available; remove the \"datacore\" entry from $cfg yourself"
     fi
   fi
 
-  if [ -n "$removed" ]; then ok "removed the Datacore entry from $removed"
-  else info "no AI client entry for this install"; fi
+  if [ -n "$removed" ]; then
+    ok "removed the Datacore entry from $removed"
+    [ -n "${_desktop_backup:-}" ] && info "previous Claude Desktop config kept at $_desktop_backup"
+  else
+    info "no AI client entry for this install"
+  fi
 }
 
 # ---------------------------------------------------------------- 3. macOS login agent
@@ -160,8 +181,41 @@ remove_images() {
 
 # ---------------------------------------------------------------- 5. data
 
+# Refuse to hand rm -rf anything that is not recognisably a Datacore data directory. The removal
+# below also runs as root inside a container with the parent directory mounted, so a wrong value
+# here is not a small mistake.
+assert_safe_to_delete() {
+  _t=$1
+  case "$_t" in
+    /|"$HOME"|"$HOME"/|/usr|/etc|/var|/opt|/home|/Users|"") 
+      die "Refusing to delete $_t: that is not a Datacore data directory." ;;
+    /*) ;;
+    *)  die "Refusing to delete a relative path: $_t" ;;
+  esac
+  # A Datacore data directory carries the runtime's own state. Requiring one of these means a
+  # misconfigured DATACORE_HOME pointing at, say, a documents folder is refused rather than erased.
+  for _m in postgres runtime coordinator; do
+    [ -e "$_t/$_m" ] && return 0
+  done
+  die "Refusing to delete $_t: it does not look like a Datacore data directory." \
+      "Expected one of postgres/, runtime/ or coordinator/ inside it." \
+      "If you are certain, remove it yourself."
+}
+
 remove_data() {
+  # Establish *which* directory before asking whether it exists: an unknown location used to
+  # fall back to the shared $HOME/.datacore-local, which another install may own.
+  if [ "$DATA_HOME_KNOWN" != 1 ]; then
+    if [ "$PURGE_DATA" = 1 ]; then
+      die "Cannot find this install's data directory, so --purge-data has nothing it can safely delete." \
+          "The install's .env is missing or unreadable. Pass DATACORE_HOME=<path> to say which" \
+          "directory to remove, after checking it is the right one."
+    fi
+    info "data directory unknown (this install's .env is missing); nothing removed"
+    return 0
+  fi
   [ -d "$DATA_HOME" ] || { info "no data directory at $DATA_HOME"; return 0; }
+
   size=$(du -sh "$DATA_HOME" 2>/dev/null | cut -f1)
   if [ "$PURGE_DATA" != 1 ]; then
     info "data kept at $DATA_HOME ($size)"
@@ -170,6 +224,7 @@ remove_data() {
   fi
   confirm "Permanently delete your Datacore data at $DATA_HOME ($size)? This cannot be undone." \
     || { info "data kept at $DATA_HOME"; return 0; }
+  assert_safe_to_delete "$DATA_HOME"
   # Postgres writes as root inside its container, so parts of the tree are root-owned and a plain
   # rm fails. Do the removal from a container, which runs as root, before falling back to sudo.
   if ! rm -rf "$DATA_HOME" 2>/dev/null; then

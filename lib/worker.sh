@@ -82,7 +82,9 @@ export DC_EXECUTORS_PATH="$EXECUTORS"
 
 # ---------------------------------------------------------------- helpers
 
-die()  { printf '%s\n' "$1" >&2; exit 1; }
+# Prints every argument, one per line: a die() that printed only "$1" silently dropped the
+# explanation lines its callers pass, leaving the user a bare refusal and no remedy.
+die()  { while [ $# -gt 0 ]; do printf '%s\n' "$1" >&2; shift; done; exit 1; }
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '  ✓ %s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*" >&2; }
@@ -176,10 +178,10 @@ restart_coordinator_if_needed() {
   # Restarting is not the same as succeeding. If the profiles were never written -- the
   # directory is a bind-mount target and can be root-owned -- the Coordinator silently falls
   # back to the example list in the image, and claiming success here hides that completely.
-  if [ -f "$EXECUTORS" ]; then
+  if [ -f "$EXECUTORS" ] && grep -q '"executor_id"' "$EXECUTORS" 2>/dev/null; then
     ok "updated the Coordinator's executor profiles so these workers can be dispatched to"
   else
-    warn "the Coordinator restarted, but no executor profiles were written to $EXECUTORS"
+    warn "the Coordinator restarted, but no executor profiles reached $EXECUTORS"
     warn "it is still dispatching from the example list in the image; enabled workers outside that list will not be reached"
   fi
 }
@@ -189,11 +191,23 @@ restart_bridge_if_running() {
   _start="$ROOT/current/start-host-worker-bridge.sh"
   [ -x "$_stop" ] && [ -x "$_start" ] || return 0
   pgrep -f 'host-worker-bridge' >/dev/null 2>&1 || return 0
-  if (cd "$ROOT/current" && "$_stop" >/dev/null 2>&1 && "$_start" >/dev/null 2>&1); then
-    ok "restarted the worker bridge so it picks up the change"
-  else
+  if ! (cd "$ROOT/current" && "$_stop" >/dev/null 2>&1 && "$_start" >/dev/null 2>&1); then
     warn "could not restart the worker bridge — run: datacore restart"
+    return 0
   fi
+  # The start script backgrounds the bridge and returns 0 before it is up, so ask the process
+  # table instead. A bridge that exits on a bad config would otherwise be reported as restarted.
+  _waited=0
+  while [ "$_waited" -lt 10 ]; do
+    if pgrep -f 'host-worker-bridge' >/dev/null 2>&1; then
+      ok "restarted the worker bridge so it picks up the change"
+      return 0
+    fi
+    sleep 1
+    _waited=$((_waited + 1))
+  done
+  warn "the worker bridge was told to start but is not running after 10s"
+  warn "check it with: datacore doctor    then: datacore restart"
 }
 
 # ---------------------------------------------------------------- the registry program
