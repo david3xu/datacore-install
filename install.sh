@@ -37,6 +37,7 @@ BUN_VERSION="${DATACORE_BUN_VERSION:-1.3.13}"
 SELF_DIR=""
 [ -f "$0" ] && SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || true
 BUNDLE_DIR=""
+SUMS_FILE=""
 
 # ---------------------------------------------------------------- output helpers
 
@@ -77,6 +78,18 @@ docker_install_hint() {
 ensure_container_runtime() {
   command -v docker >/dev/null 2>&1 || die "No container runtime found." "$(docker_install_hint)"
   if docker info >/dev/null 2>&1; then ok "container runtime is running"; return; fi
+
+  # A fresh Docker Engine install leaves the socket root-owned, so the daemon is running and the
+  # user still cannot talk to it. Saying "install Docker" here sends people down the wrong path.
+  case "$(docker info 2>&1 || true)" in
+    *"permission denied"*)
+      die "Docker is running, but your user is not allowed to use it." \
+          "Add yourself to the docker group, then start a new shell and run this installer again:
+
+  sudo usermod -aG docker \"$(id -un)\"
+
+(Docker's own post-install step: https://docs.docker.com/engine/install/linux-postinstall/)" ;;
+  esac
   if command -v colima >/dev/null 2>&1; then
     info "colima is installed but not running — starting it (this takes a minute)"
     colima start >/dev/null 2>&1 || die "colima failed to start." "Run 'colima start' yourself to see why."
@@ -92,13 +105,20 @@ ensure_container_runtime() {
 # Linux: take the binary out of the official bun image. Docker is already required, the image
 # carries a glibc build for the host architecture, and this needs no unzip and no package manager.
 bun_from_docker() {
-  docker pull -q "$BUN_IMAGE" >/dev/null 2>&1 || return 1
-  _cid=$(docker create "$BUN_IMAGE" 2>/dev/null) || return 1
-  docker cp "$_cid:/usr/local/bin/bun" "$BIN_DIR/bun.new" >/dev/null 2>&1 || {
+  _log=$(mktemp) || return 1
+  if ! docker pull -q "$BUN_IMAGE" >"$_log" 2>&1; then
+    BUN_FETCH_ERR="docker pull $BUN_IMAGE: $(tail -2 "$_log")"; rm -f "$_log"; return 1
+  fi
+  if ! _cid=$(docker create "$BUN_IMAGE" 2>"$_log"); then
+    BUN_FETCH_ERR="docker create $BUN_IMAGE: $(tail -2 "$_log")"; rm -f "$_log"; return 1
+  fi
+  if ! docker cp "$_cid:/usr/local/bin/bun" "$BIN_DIR/bun.new" >"$_log" 2>&1; then
+    BUN_FETCH_ERR="docker cp: $(tail -2 "$_log")"
     docker rm -f "$_cid" >/dev/null 2>&1 || true
-    return 1
-  }
+    rm -f "$_log"; return 1
+  fi
   docker rm -f "$_cid" >/dev/null 2>&1 || true
+  rm -f "$_log"
 }
 
 # macOS: the official zip. unzip ships with macOS, so nothing has to be installed first.
@@ -106,16 +126,18 @@ bun_from_release() {
   case "$PLATFORM_ARCH" in
     arm64) _zip=bun-darwin-aarch64 ;;
     amd64) _zip=bun-darwin-x64 ;;
-    *) return 1 ;;
+    *) BUN_FETCH_ERR="no bun build for $PLATFORM_OS/$PLATFORM_ARCH"; return 1 ;;
   esac
   _tmp=$(mktemp -d) || return 1
-  if fetch "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$_zip.zip" "$_tmp/bun.zip" \
-     && unzip -q -o -j "$_tmp/bun.zip" "$_zip/bun" -d "$_tmp" \
-     && mv "$_tmp/bun" "$BIN_DIR/bun.new"; then
-    rm -rf "$_tmp"
-  else
-    rm -rf "$_tmp"; return 1
+  _url="https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$_zip.zip"
+  if ! fetch "$_url" "$_tmp/bun.zip" 2>"$_tmp/err"; then
+    BUN_FETCH_ERR="download $_url: $(tail -2 "$_tmp/err")"; rm -rf "$_tmp"; return 1
   fi
+  if ! unzip -q -o -j "$_tmp/bun.zip" "$_zip/bun" -d "$_tmp" 2>"$_tmp/err"; then
+    BUN_FETCH_ERR="unzip: $(tail -2 "$_tmp/err")"; rm -rf "$_tmp"; return 1
+  fi
+  mv "$_tmp/bun" "$BIN_DIR/bun.new" || { rm -rf "$_tmp"; return 1; }
+  rm -rf "$_tmp"
 }
 
 ensure_bun() {
@@ -129,14 +151,12 @@ ensure_bun() {
   fi
 
   info "bun is not installed — fetching a private copy into $BIN_DIR (nothing system-wide)"
-  if [ "$PLATFORM_OS" = linux ]; then
-    bun_from_docker || die "Could not obtain bun." \
-      "Datacore's own scripts run on bun. Install it yourself and run this installer again:
+  BUN_FETCH_ERR=""
+  if [ "$PLATFORM_OS" = linux ]; then _got_bun=bun_from_docker; else _got_bun=bun_from_release; fi
+  if ! $_got_bun; then
+    die "Could not obtain bun." "${BUN_FETCH_ERR:-no further detail}
 
-  curl -fsSL https://bun.sh/install | bash"
-  else
-    bun_from_release || die "Could not obtain bun." \
-      "Datacore's own scripts run on bun. Install it yourself and run this installer again:
+Datacore's own scripts run on bun. Retry, or install it yourself and run this installer again:
 
   curl -fsSL https://bun.sh/install | bash"
   fi
@@ -170,6 +190,7 @@ download_and_verify() {
   info "downloading $VERSION ($PLATFORM_ARCH)"
   fetch "$rel/$archive"   "$TMP/$archive"  || die "Could not download the release archive."
   fetch "$rel/SHA256SUMS" "$TMP/SHA256SUMS" || die "Could not download SHA256SUMS. Refusing to install an unverified archive."
+  SUMS_FILE="$TMP/SHA256SUMS"
 
   want=$(grep " $archive\$" "$TMP/SHA256SUMS" | cut -d' ' -f1 || true)
   [ -n "$want" ] || die "SHA256SUMS does not list $archive." \
@@ -239,11 +260,19 @@ prepare_env() {
 
 start_stack() {
   cd "$BUNDLE_DIR"
-  if [ -f "$DATA_HOME/.last-good-bundle" ]; then
-    ./start-datacore-local.sh >/dev/null 2>&1 || die "Datacore failed to start." "Run: $BUNDLE_DIR/doctor.sh"
-  else
-    ./install-datacore-local.sh >/dev/null 2>&1 || die "Install failed." "Run: $BUNDLE_DIR/doctor.sh"
+  if [ -f "$DATA_HOME/.last-good-bundle" ]; then _cmd=./start-datacore-local.sh
+  else _cmd=./install-datacore-local.sh; fi
+
+  # Keep the output: "run doctor.sh" is useless advice when the reason is already on screen, and
+  # doctor cannot explain a failure that happened while loading images.
+  _log="${TMPDIR:-/tmp}/datacore-start.$$.log"
+  if ! "$_cmd" >"$_log" 2>&1; then
+    die "Datacore failed to start." "$(tail -12 "$_log")
+
+Full output: $_log
+Diagnose:    $BUNDLE_DIR/doctor.sh"
   fi
+  rm -f "$_log"
 
   port=$(grep '^DATACORE_HTTP_PORT=' .env | cut -d= -f2)
   RUNTIME_URL="http://127.0.0.1:${port:-53123}"
@@ -309,30 +338,41 @@ register_clients() {
 
 # ---------------------------------------------------------------- 7. front-door command
 
+# The front door is three files: the `datacore` dispatcher and the two lib scripts it execs for
+# `provider` and `worker`. Installing only the dispatcher leaves those verbs dead, so place all
+# three. Prefer siblings of this script (local run / dev); otherwise take them from the release.
+CLI_FILES="datacore lib/provider.sh lib/worker.sh"
+
 install_command() {
-  mkdir -p "$BIN_DIR"
+  mkdir -p "$BIN_DIR/lib"
+  if [ "$VERSION" = latest ]; then _rel="$RELEASE_BASE/latest/download"
+  else _rel="$RELEASE_BASE/download/$VERSION"; fi
 
-  # Prefer the script sitting next to install.sh (local run / dev); fall back to the release.
-  # Under `curl | sh` there is no script file: $0 is "sh", so dirname gives the user's CWD and a
-  # stray file named datacore there would be installed. Only trust a sibling when $0 is a real file.
-  _script_src=""
-  if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/datacore" ]; then
-    _script_src="$SELF_DIR/datacore"
-  else
-    info "datacore script not found locally — downloading from release"
-    if [ "$VERSION" = latest ]; then _rel="$RELEASE_BASE/latest/download"
-    else _rel="$RELEASE_BASE/download/$VERSION"; fi
-    fetch "$_rel/datacore" "$BIN_DIR/datacore" \
-      || die "Could not download the datacore command script." \
-             "Check your network, or re-run the installer."
-    chmod +x "$BIN_DIR/datacore"
-    ok "installed the datacore command to $BIN_DIR"
-    case ":$PATH:" in *":$BIN_DIR:"*) ;; *) info "add to PATH:  export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
-    return
-  fi
-
-  cp "$_script_src" "$BIN_DIR/datacore"
+  _downloaded=0
+  for _f in $CLI_FILES; do
+    # Under `curl | sh` there is no script file: $0 is "sh", so dirname gives the user's CWD and a
+    # stray file of the same name there would be installed. Only trust a sibling when $0 is a file.
+    if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/$_f" ]; then
+      cp "$SELF_DIR/$_f" "$BIN_DIR/$_f"
+    else
+      _name=$(basename "$_f")
+      fetch "$_rel/$_name" "$BIN_DIR/$_f" \
+        || die "Could not download $_name from the release." \
+               "Check your network, or re-run the installer."
+      # These land on the user's PATH, so hold them to the same standard as the archive.
+      _want=$(grep " $_name\$" "$SUMS_FILE" 2>/dev/null | cut -d' ' -f1 || true)
+      [ -n "$_want" ] || { rm -f "$BIN_DIR/$_f"; die "SHA256SUMS does not list $_name." \
+        "This release is incomplete; nothing was added to your PATH."; }
+      _got=$(sha256_of "$BIN_DIR/$_f")
+      [ "$_want" = "$_got" ] || { rm -f "$BIN_DIR/$_f"; die "Checksum mismatch on $_name — refusing to install." \
+        "expected $_want
+     actual $_got"; }
+      _downloaded=1
+    fi
+  done
   chmod +x "$BIN_DIR/datacore"
+
+  if [ "$_downloaded" = 1 ]; then info "downloaded the datacore command from the release"; fi
   ok "installed the datacore command to $BIN_DIR"
   case ":$PATH:" in *":$BIN_DIR:"*) ;; *) info "add to PATH:  export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
 }
