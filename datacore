@@ -14,12 +14,20 @@ set -eu
 _SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || _SELF_DIR=""
 if [ -n "${DATACORE_INSTALL_ROOT:-}" ]; then
   ROOT="$DATACORE_INSTALL_ROOT"
-elif [ -n "$_SELF_DIR" ] && [ -d "$_SELF_DIR/../versions" ]; then
+elif [ -n "$_SELF_DIR" ] && { [ -d "$_SELF_DIR/../versions" ] || [ -e "$_SELF_DIR/../current" ]; }; then
+  # `versions/` is what this installer creates, but an install made before it exists keeps its
+  # bundles directly under the root with the same `current` pointer. Accepting either means the
+  # command works when dropped into such an install's bin/ without exporting anything.
   ROOT=$(cd "$_SELF_DIR/.." && pwd)
 else
   ROOT="$HOME/.datacore"
 fi
 C="$ROOT/current"
+
+# Every lib script resolves its own paths from this, so export the root we just resolved rather
+# than letting each one fall back to ~/.datacore. Without this, `datacore uninstall` run from an
+# install in a non-default location would target the default location instead.
+DATACORE_INSTALL_ROOT="$ROOT"; export DATACORE_INSTALL_ROOT
 
 # `datacore update` re-runs the installer, which is what knows how to fetch the latest release and
 # hand the previous install to the new bundle's upgrade step. Overridable for a private mirror.

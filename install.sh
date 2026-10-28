@@ -21,7 +21,11 @@ set -eu
 VERSION="${DATACORE_VERSION:-latest}"
 RELEASE_BASE="${DATACORE_RELEASE_BASE:-https://github.com/david3xu/datacore-install/releases}"
 INSTALL_ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
-DATA_HOME="${DATACORE_HOME:-$HOME/.datacore-local}"
+# Data lives under the install root by default, not in a fixed $HOME/.datacore-local. That shared
+# path is what both the bundle's generator and this installer used to default to, so a second
+# install silently adopted the first one's database. Set DATACORE_HOME explicitly to point a new
+# install at existing data on purpose.
+DATA_HOME="${DATACORE_HOME:-$INSTALL_ROOT/data}"
 COMPOSE_PROJECT="${DATACORE_COMPOSE_PROJECT:-datacore-local}"
 BIN_DIR="$INSTALL_ROOT/bin"
 
@@ -295,12 +299,39 @@ prepare_env() {
     info "upgrade: configuration will be inherited from $(basename "$PREVIOUS_DIR")"
     return
   fi
-  [ -f .env ] || cp .env.example .env
+  # Let the bundle write its own .env. It mints the six required identities
+  # (DATACORE_{COORDINATOR,LOCAL_WORKER,GATEWAY,GATEWAY_CALLER,CLAUDE_DESKTOP,CLAUDE_CODE}_AGENT_ID)
+  # along with its secrets, and only when .env is absent. Copying .env.example over it — which this
+  # installer used to do — left all six empty, and the bundle's own preflight then refused to start
+  # with "Missing DATACORE_COORDINATOR_AGENT_ID in bundle .env". That broke every install on a
+  # genuinely clean machine.
+  #
+  # The generating run stops at preflight because the worker project map is not set yet, which is
+  # the next thing this function does. Preflight runs before any docker work, so that first pass
+  # costs nothing and leaves a complete .env behind; start_stack runs the same script again once the
+  # map is in place.
+  if [ ! -f .env ]; then
+    _envlog="${TMPDIR:-/tmp}/datacore-env.$$.log"
+    DATACORE_HOME="$DATA_HOME" DATACORE_LOCAL_EDITION_SKIP_DOCTOR_GATE=1 \
+      ./install-datacore-local.sh >"$_envlog" 2>&1 || true
+    if [ ! -f .env ]; then
+      die "The bundle did not write its configuration." "$(tail -12 "$_envlog")
 
-  # DATACORE_HOME ships as a change-me placeholder; the installer owns it, the user never sees it.
-  if grep -q '^DATACORE_HOME=change-me' .env 2>/dev/null; then
+Full output: $_envlog"
+    fi
+    rm -f "$_envlog"
+    info "generated configuration and identities"
+  fi
+
+  # The installer owns DATACORE_HOME; the user never sees it. Set it unconditionally rather than only
+  # replacing the .env.example placeholder: the bundle's own generator writes
+  # DATACORE_HOME=$HOME/.datacore-local, which is a path another Datacore install may already own, so
+  # honouring it would point a new install at an existing install's data.
+  if grep -q '^DATACORE_HOME=' .env 2>/dev/null; then
     tmp_env=$(mktemp)
-    sed "s|^DATACORE_HOME=change-me.*|DATACORE_HOME=$DATA_HOME|" .env > "$tmp_env" && mv "$tmp_env" .env
+    sed "s|^DATACORE_HOME=.*|DATACORE_HOME=$DATA_HOME|" .env > "$tmp_env" && mv "$tmp_env" .env
+  else
+    printf 'DATACORE_HOME=%s\n' "$DATA_HOME" >> .env
   fi
   mkdir -p "$DATA_HOME"
 
@@ -308,7 +339,7 @@ prepare_env() {
   # install never reads it. Supply a valid default so the user is never asked to write JSON.
   if ! grep -q '^DATACORE_WORKER_PROJECT_WORKSPACES=.\+' .env 2>/dev/null; then
     printf '\nDATACORE_WORKER_PROJECT_WORKSPACES=%s\n' "'{\"default\":\"$HOME\"}'" >> .env
-    info "set a default worker workspace map (change it with: datacore worker add)"
+    info "set a placeholder worker project map (edit DATACORE_WORKER_PROJECT_WORKSPACES in .env)"
   fi
 
   # Compose derives its project name from the directory, which is the 'current' symlink. Pinning it
@@ -349,7 +380,7 @@ The previous version is still installed. Start it with: datacore start"
     die "Datacore failed to start." "$(tail -12 "$_log")
 
 Full output: $_log
-Diagnose:    $BUNDLE_DIR/doctor.sh"
+Diagnose:    $BIN_DIR/datacore doctor"
   fi
   rm -f "$_log"
 
@@ -360,7 +391,7 @@ Diagnose:    $BUNDLE_DIR/doctor.sh"
     curl -fsS -m 3 "$RUNTIME_URL/health" >/dev/null 2>&1 && break
     i=$((i + 1)); sleep 1
   done
-  [ $i -lt 60 ] || die "Datacore started but never reported healthy." "Run: $BUNDLE_DIR/doctor.sh"
+  [ $i -lt 60 ] || die "Datacore started but never reported healthy." "Run: $BIN_DIR/datacore doctor"
   ok "runtime healthy at $RUNTIME_URL"
   gate_on_doctor
 }
@@ -379,7 +410,7 @@ gate_on_doctor() {
     die "Datacore started, but doctor reports a problem." "$_blocking
 
 Full report: $_dlog
-Re-run:      $BUNDLE_DIR/doctor.sh"
+Re-run:      $BIN_DIR/datacore doctor"
   fi
   rm -f "$_dlog"
   if [ "${_workers:-0}" -gt 0 ]; then

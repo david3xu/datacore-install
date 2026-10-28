@@ -50,12 +50,15 @@ run Docker's post-install step — the installer tells you the command.
 1. Detects your platform and refuses clearly if it is unsupported
 2. Starts your container runtime, or tells you exactly how to install one
 3. Downloads the release archive and **verifies its SHA-256 before extracting**
-4. Installs to `~/.datacore/versions/<version>` and points `current` at it
+4. Installs to `~/.datacore/versions/<version>` and points `current` at it, with your data in
+   `~/.datacore/data` — set `DATACORE_HOME` to put it elsewhere, or to point a new install at data
+   that already exists
 5. Shows the licence terms and records your acceptance
-6. Starts Datacore and waits until it reports healthy
-7. Registers Datacore with every AI client it finds, and **verifies the connection works**
-8. On macOS, sets Datacore to **start automatically at login**
-9. Prints one next step
+6. Has Datacore generate its own configuration and service identities
+7. Starts Datacore and waits until it reports healthy
+8. Registers Datacore with every AI client it finds, and **verifies the connection works**
+9. On macOS, sets Datacore to **start automatically at login**
+10. Prints one next step
 
 Nothing is hand-edited. You will not be asked to open a file in an editor.
 
