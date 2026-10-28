@@ -351,3 +351,64 @@ jobs:
           if [ "$n" -gt 4 ]; then
             echo "::warning::the released lib/worker.sh cannot trim the registry ($n workers enabled) — cut a release carrying the current lib/worker.sh"
           fi
+
+  desktop-entry:
+    name: the Claude Desktop remover keeps its contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # This is the only script that rewrites a file the user owns -- their Claude Desktop config,
+      # which holds every other MCP server they have. It had no automated coverage, and its
+      # failure modes are silent: a half-written file, or an entry claimed from another install.
+      # The Desktop path is macOS-gated so the install jobs never reach it, but the script itself
+      # is plain Python and runs anywhere.
+      - name: Exercise every exit path
+        run: |
+          set -eu
+          S=lib/uninstall-desktop-entry.py
+          T=$(mktemp -d)
+          fail() { echo "::error::$1"; exit 1; }
+          try() { set +e; python3 -I "$S" "$1" "$2" >"$T/out" 2>&1; printf '%s' "$?"; set -e; }
+
+          # Ours: the entry goes, everything else in the user's config stays.
+          printf '%s' '{"mcpServers":{"other":{"command":"x"},"datacore":{"args":["http://127.0.0.1:43123/mcp"]}},"theme":"dark"}' > "$T/a.json"
+          [ "$(try "$T/a.json" 43123)" = 0 ] || fail "removing our own entry did not exit 0"
+          python3 -I -c "
+          import json,sys
+          c=json.load(open('$T/a.json'))
+          assert 'datacore' not in c['mcpServers'], 'our entry was not removed'
+          assert 'other' in c['mcpServers'], 'another MCP server was destroyed'
+          assert c.get('theme')=='dark', 'unrelated config was lost'"
+
+          # Another install's entry: 3123 must not match 43123.
+          printf '%s' '{"mcpServers":{"datacore":{"args":["http://127.0.0.1:43123/mcp"]}}}' > "$T/b.json"
+          [ "$(try "$T/b.json" 3123)" = 1 ] || fail "port 3123 claimed the entry belonging to 43123"
+          grep -q datacore "$T/b.json" || fail "another install's entry was deleted"
+
+          # No entry of ours at all.
+          printf '%s' '{"mcpServers":{"other":{}}}' > "$T/c.json"
+          [ "$(try "$T/c.json" 43123)" = 1 ] || fail "a config without our entry should exit 1"
+
+          # Malformed config: a clean error, the file untouched, and no traceback for the user.
+          printf '%s' '{"mcpServers": {oops' > "$T/d.json"
+          [ "$(try "$T/d.json" 43123)" = 3 ] || fail "a malformed config should exit 3"
+          grep -qi traceback "$T/out" && fail "a traceback reached the user" || true
+          [ "$(cat "$T/d.json")" = '{"mcpServers": {oops' ] || fail "a malformed config was modified"
+
+          [ "$(try "$T/absent.json" 43123)" = 3 ] || fail "a missing file should exit 3"
+
+          # An unwritable directory must leave the original intact and drop no temp file: the
+          # earlier version truncated the config first, so a failure here lost the whole file.
+          printf '%s' '{"mcpServers":{"datacore":{"args":["127.0.0.1:43123"]},"keep":{"command":"y"}}}' > "$T/e.json"
+          cp "$T/e.json" "$T/e.expected"; chmod 500 "$T"
+          st=$(try "$T/e.json" 43123); chmod 700 "$T"
+          [ "$st" = 3 ] || fail "an unwritable directory should exit 3 (got $st)"
+          cmp -s "$T/e.json" "$T/e.expected" || fail "the config was damaged by a failed rewrite"
+          # Test for emptiness rather than counting: `wc -l` pads its output on some platforms,
+          # which made this check fail on a directory that was in fact clean.
+          [ -z "$(find "$T" -name '.datacore-mcp-*')" ] || fail "a temp file was left behind"
+
+          set +e; python3 -I "$S" >/dev/null 2>&1; u=$?; set -e
+          [ "$u" = 2 ] || fail "wrong usage should exit 2"
+          echo "every exit path holds: 0 removed, 1 not ours, 2 usage, 3 unreadable/unwritable"
