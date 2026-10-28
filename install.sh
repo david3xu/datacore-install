@@ -62,7 +62,13 @@ say()  { printf '%s\n' "$*"; }
 ok()   { printf '  %s✓%s %s\n' "$B" "$R" "$*"; }
 info() { printf '  %s·%s %s\n' "$D" "$R" "$*"; }
 warn() { printf '  %s!%s %s\n' "$B" "$R" "$*"; }
-die()  { printf '\n%sInstall stopped.%s %s\n\n' "$B" "$R" "$1" >&2; [ $# -gt 1 ] && printf '%s\n\n' "$2" >&2; exit 1; }
+die()  {
+  printf '\n%sInstall stopped.%s %s\n\n' "$B" "$R" "$1" >&2
+  shift
+  while [ $# -gt 0 ]; do printf '%s\n' "$1" >&2; shift; done
+  printf '\n' >&2
+  exit 1
+}
 step() { printf '\n%s%s%s\n' "$B" "$*" "$R"; }
 
 # ---------------------------------------------------------------- 1. platform
@@ -232,7 +238,13 @@ download_and_verify() {
   # arm64 image cannot run on an x86_64 host. detect_platform set PLATFORM_ARCH.
   archive="datacore-local-edition-${PLATFORM_ARCH}.tar.gz"
   info "downloading $VERSION ($PLATFORM_ARCH)"
-  fetch "$rel/$archive"   "$TMP/$archive"  || die "Could not download the release archive."
+  # A release can be published carrying only one architecture. The user on the other one sees a
+  # download failure and has no way to tell it apart from a network problem, so name the release
+  # and the architecture rather than leaving them to guess.
+  fetch "$rel/$archive" "$TMP/$archive" || die \
+    "Could not download $archive from $VERSION." \
+    "Either the network is unavailable, or this release does not carry a build for $PLATFORM_ARCH." \
+    "Check which architectures it has: $RELEASE_BASE/tag/$VERSION"
   fetch "$rel/SHA256SUMS" "$TMP/SHA256SUMS" || die "Could not download SHA256SUMS. Refusing to install an unverified archive."
   SUMS_FILE="$TMP/SHA256SUMS"
 

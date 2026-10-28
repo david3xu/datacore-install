@@ -254,6 +254,42 @@ jobs:
             exit 1
           fi
 
+      # A release can exist and still be unusable. One was published carrying only the amd64
+      # bundle -- every Apple Silicon user 404s -- and with a SHA256SUMS listing hashes for
+      # archives that were not the ones attached, because the assets were uploaded from a stale
+      # build. The installer verifies the archive, so that fails loudly at install time; this
+      # fails it at release time instead, which is where it can still be fixed.
+      - name: the published release is complete and self-consistent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          names=$(gh release view "$pinned" --repo "${{ github.repository }}" --json assets \
+                    --jq '.assets[].name' | sort)
+          echo "assets attached to $pinned:"; printf '%s\n' "$names" | sed 's/^/  /'
+          missing=""
+          for want in datacore-local-edition-amd64.tar.gz datacore-local-edition-arm64.tar.gz \
+                      SHA256SUMS worker.sh provider.sh uninstall.sh datacore \
+                      uninstall-desktop-entry.py; do
+            printf '%s\n' "$names" | grep -qx "$want" || missing="$missing $want"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::$pinned is missing:$missing"
+            exit 1
+          fi
+
+          # Every asset the manifest names must hash to what the manifest claims. This is the
+          # check that catches assets uploaded from a different build than the manifest.
+          work=$(mktemp -d); cd "$work"
+          gh release download "$pinned" --repo "${{ github.repository }}" --clobber
+          if sha256sum -c SHA256SUMS; then
+            echo "every published asset matches the published SHA256SUMS"
+          else
+            echo "::error::$pinned has assets that do not match its own SHA256SUMS — they were uploaded from a different build"
+            exit 1
+          fi
+
   published:
     name: install from the published one-liner
     runs-on: ubuntu-24.04
