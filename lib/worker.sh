@@ -29,6 +29,13 @@ REGISTRY="$GEN/azure-worker-registry.json"
 CATALOGUE="$GEN/azure-worker-catalogue.json"
 BUNDLE_CONFIG="$ROOT/current/support/install-config.js"
 
+# The bundle copies its generated registry to $DATACORE_HOME/runtime/worker-registry.json at install
+# time, and the host worker bridge reads *that* copy — DATACORE_WORKER_REGISTRY_PATH in its
+# environment points there. Editing only the bundle copy changes a file nothing dispatches from,
+# which is exactly the failure this command was written to fix, so keep both in step.
+RUNTIME_REGISTRY="${DATACORE_WORKER_REGISTRY_PATH:-$DATA_HOME/runtime/worker-registry.json}"
+export DC_RUNTIME_REGISTRY="$RUNTIME_REGISTRY"
+
 # ---------------------------------------------------------------- helpers
 
 die()  { printf '%s\n' "$1" >&2; exit 1; }
@@ -103,6 +110,16 @@ const write = (p, doc) => {
   writeFileSync(p, JSON.stringify(doc, null, 2) + "\n", "utf8");
   try { chmodSync(p, 0o600); } catch {}
 };
+
+// The bridge dispatches from the runtime copy, not the bundle's generated one, so every write to the
+// registry has to land in both. Writing only the bundle copy is the failure mode this command
+// exists to fix: it would report success and change nothing the runtime reads.
+const RUNTIME = process.env.DC_RUNTIME_REGISTRY || "";
+function writeRegistry(doc) {
+  write(registryPath, doc);
+  if (!RUNTIME || RUNTIME === registryPath || !existsSync(RUNTIME)) return;
+  write(RUNTIME, doc);
+}
 // The bridge dispatches by phase, so an entry with no phases is an identity rather than a dispatch
 // target: the MCP operator is one, and it carries cli:"claude-code" like any worker, so testing the
 // cli field would drop it and take the client's MCP token with it. Phases are the real distinction.
@@ -194,6 +211,22 @@ catalogue.workers = catalogue.workers || [];
 const fams = families(configPath);
 
 if (cmd === "list") {
+  // Report against the copy the bridge actually reads. A mismatch between the two means something
+  // wrote one without the other — the bundle regenerating its copy on upgrade, or an older version
+  // of this command — and it shows up as workers that are listed but never dispatched to.
+  if (RUNTIME && RUNTIME !== registryPath && existsSync(RUNTIME)) {
+    try {
+      const live = read(RUNTIME).workers || [];
+      const liveIds = new Set(live.filter((w) => !isInfra(w)).map((w) => w.agent_id));
+      const bundleIds = new Set(registry.workers.filter((w) => !isInfra(w)).map((w) => w.agent_id));
+      const drift = [...liveIds].filter((x) => !bundleIds.has(x)).concat([...bundleIds].filter((x) => !liveIds.has(x)));
+      if (drift.length) {
+        console.log(`  ! the runtime copy and the bundle copy disagree on ${drift.length} worker(s).`);
+        console.log(`    The bridge dispatches from ${RUNTIME}.`);
+        console.log("    Run: datacore worker prune   (rewrites both)");
+      }
+    } catch {}
+  }
   const enabled = summarise(registry.workers);
   const avail = catalogue.workers.filter((w) => !isInfra(w) && w.token).length - enabled;
   console.log(`  ${enabled} enabled, ${avail} more available (datacore worker add <name>)`);
@@ -218,7 +251,7 @@ if (cmd === "prune") {
     return present.has(meta.cli || w.cli);          // and the CLI has to actually be installed
   });
   registry.workers = [...catalogue.workers.filter(isInfra), ...keep];
-  write(registryPath, registry);
+  writeRegistry(registry);
   const n = summarise(registry.workers);
   console.log(`  ${n} worker(s) enabled of ${catalogue.workers.filter((w) => !isInfra(w)).length} the bundle minted`);
   process.exit(0);
@@ -240,7 +273,7 @@ if (cmd === "enable" || cmd === "disable") {
     const before = registry.workers.length;
     registry.workers = registry.workers.filter((w) => isInfra(w) || !matches(w));
     if (registry.workers.length === before) die(`Nothing enabled matches '${sel}'. Run: datacore worker list`);
-    write(registryPath, registry);
+    writeRegistry(registry);
     console.log(`  removed ${before - registry.workers.length} worker(s)`);
     summarise(registry.workers);
     process.exit(0);
@@ -274,7 +307,7 @@ if (cmd === "enable" || cmd === "disable") {
   const fresh = add.filter((w) => !have.has(w.agent_id));
   if (!fresh.length) { console.log(`  already enabled: ${add.map((w) => w.agent_id).join(", ")}`); process.exit(0); }
   registry.workers = [...registry.workers, ...fresh];
-  write(registryPath, registry);
+  writeRegistry(registry);
   console.log(`  enabled ${fresh.length} worker(s)`);
   summarise(registry.workers);
   process.exit(0);
