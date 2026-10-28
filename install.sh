@@ -530,7 +530,10 @@ register_clients() {
     claude mcp remove datacore -s user >/dev/null 2>&1 || true
     if claude mcp add --transport http --scope user datacore "$RUNTIME_URL/mcp" \
          --header "Authorization: Bearer $CLAUDE_CODE_TOKEN" \
-         --header "X-Datacore-MCP-Tool-Bundle: $BUNDLE" >/dev/null 2>&1; then
+         --header "X-Datacore-MCP-Tool-Bundle: $BUNDLE" >/dev/null 2>&1 &&
+       # `mcp add` exiting 0 is not the same as an entry existing: it is scope- and
+       # cwd-sensitive, so read it back rather than trusting the exit status.
+       claude mcp get datacore >/dev/null 2>&1; then
       ok "registered with Claude Code"; REGISTERED='Claude Code'
     else
       info "could not register with Claude Code"
@@ -643,16 +646,32 @@ install_login_agent() {
       *":$_bundir:"*) ;;
       *)
         if plutil -replace EnvironmentVariables.PATH -string "$_bundir:$HOME/.local/bin:$_oldpath" "$_plist" 2>/dev/null; then
+          # bootout unloads the agent; if the bootstrap that reloads it then fails, autostart has
+          # been removed rather than fixed. Say so instead of letting the success line below imply
+          # the agent is still there.
           _uid=$(id -u)
           launchctl bootout "gui/$_uid" "$_plist" >/dev/null 2>&1 || true
-          launchctl bootstrap "gui/$_uid" "$_plist" >/dev/null 2>&1 || true
+          if ! launchctl bootstrap "gui/$_uid" "$_plist" >/dev/null 2>&1; then
+            warn "could not reload the login agent after updating its PATH"
+            warn "start Datacore yourself with: datacore start, or re-run the installer"
+            return 0
+          fi
         else
           warn "could not add $_bundir to the login agent PATH; it may fail to start at login"
         fi
         ;;
     esac
   fi
-  ok "starts automatically at login (remove it with: datacore uninstall)"
+  # Claim autostart only after reading back that the agent is actually registered. Everything
+  # above can succeed command-by-command and still leave nothing loaded.
+  _uid=$(id -u)
+  if launchctl print "gui/$_uid/com.datacore.local-edition" >/dev/null 2>&1 ||
+     launchctl list 2>/dev/null | grep -q 'com\.datacore\.local-edition'; then
+    ok "starts automatically at login (remove it with: datacore uninstall)"
+  else
+    warn "the login agent is not registered, so Datacore will not start at login"
+    warn "start it yourself with: datacore start"
+  fi
 }
 
 # ---------------------------------------------------------------- main
