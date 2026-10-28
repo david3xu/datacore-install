@@ -13,6 +13,17 @@
 set -u
 
 VM_PROFILE="${VM_PROFILE:-amd64}"
+# The bundle to stage follows the VM's real architecture, asked of the VM itself. The profile name
+# is only a label: a profile called "amd64" could be anything, and hard-coding the arch here meant
+# the arm64 bundle was never exercised by this proof at all.
+VM_ARCH=$(colima ssh --profile "$VM_PROFILE" -- uname -m 2>/dev/null | tr -d '\r\n')
+case "$VM_ARCH" in
+    x86_64|amd64)   BUNDLE_ARCH=amd64 ;;
+    aarch64|arm64)  BUNDLE_ARCH=arm64 ;;
+    '') printf 'could not ask profile %s what architecture it is; is it running?\n' "$VM_PROFILE" >&2; exit 1 ;;
+    *)  printf 'profile %s reports an architecture with no bundle: %s\n' "$VM_PROFILE" "$VM_ARCH" >&2; exit 1 ;;
+esac
+OTHER_ARCH=$( [ "$BUNDLE_ARCH" = amd64 ] && echo arm64 || echo amd64 )
 SOURCE="${SOURCE:-local}"
 REPO="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 RELEASE_URL="${RELEASE_URL:-https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh}"
@@ -47,7 +58,7 @@ check() {
 }
 
 printf 'Fresh-install proof\n'
-printf '  VM profile : %s\n' "$VM_PROFILE"
+printf '  VM profile : %s (%s, staging the %s bundle)\n' "$VM_PROFILE" "$VM_ARCH" "$BUNDLE_ARCH"
 printf '  Source     : %s (scripts), %s (bundle)\n' "$SOURCE" "$DATACORE_VERSION"
 printf '  Started    : %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
@@ -113,12 +124,12 @@ if [ "$SOURCE" = stage ]; then
     vm "rm -rf ~/stage && mkdir -p ~/stage/latest/download" >/dev/null 2>&1
     for f in "$STAGE"/latest/download/*; do
         base=$(basename "$f")
-        case "$base" in *arm64*) continue ;; esac   # the VM is x86_64
+        case "$base" in *"$OTHER_ARCH"*) continue ;; esac   # only this VM's architecture
         colima ssh --profile "$VM_PROFILE" -- sh -c "cat > ~/stage/latest/download/$base" < "$f"
     done
     colima ssh --profile "$VM_PROFILE" -- sh -c "cat > ~/install.sh" < "$REPO/install.sh"
     check "staged the local bundle into the VM" \
-          'test -s ~/stage/latest/download/datacore-local-edition-amd64.tar.gz && echo present' "present"
+          "test -s ~/stage/latest/download/datacore-local-edition-$BUNDLE_ARCH.tar.gz && echo present" "present"
 elif [ "$SOURCE" = published ]; then
     vm "curl -fsSL '$RELEASE_URL' -o ~/install.sh" >/dev/null 2>&1
     check "downloaded install.sh from the published release" \
