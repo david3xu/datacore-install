@@ -1,13 +1,33 @@
 #!/bin/sh
-# Datacore worker management — add, list, remove AI coding tool workers.
-# Usage: datacore worker add [name|--all] | list | remove <name>
+# Datacore worker management — enable, list and disable the AI workers the runtime dispatches to.
+#
+# Usage: datacore worker add [name] | list | remove <name> | prune
+#
+# A worker here is an entry in the bundle's generated worker registry. That registry is the only
+# list the host worker bridge reads, so enabling a worker means putting it there and disabling one
+# means taking it out. Earlier versions of this command wrote its own JSON under
+# $DATACORE_HOME/workers, which nothing in the bundle ever read: `worker add` reported success and
+# changed nothing. It now edits the registry.
+#
 # DATACORE_HOME   runtime data directory (default: ~/.datacore-local)
 
 set -eu
 
-DATA_HOME="${DATACORE_HOME:-$HOME/.datacore-local}"
-WORKERS_DIR="$DATA_HOME/workers"
+ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
+
+# Prefer the data directory this install actually uses. The old fixed default is shared between
+# installs, so reading it blind reports another install's state as if it were this one's.
+DATA_HOME="${DATACORE_HOME:-}"
+if [ -z "$DATA_HOME" ] && [ -f "$ROOT/current/.env" ]; then
+  DATA_HOME=$(grep '^DATACORE_HOME=' "$ROOT/current/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
+fi
+[ -n "$DATA_HOME" ] || DATA_HOME="$HOME/.datacore-local"
 PROVIDERS_DIR="$DATA_HOME/providers"
+
+GEN="$ROOT/current/generated"
+REGISTRY="$GEN/azure-worker-registry.json"
+CATALOGUE="$GEN/azure-worker-catalogue.json"
+BUNDLE_CONFIG="$ROOT/current/support/install-config.js"
 
 # ---------------------------------------------------------------- helpers
 
@@ -16,197 +36,278 @@ say()  { printf '%s\n' "$*"; }
 ok()   { printf '  ✓ %s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*" >&2; }
 
-ensure_workers_dir() { mkdir -p "$WORKERS_DIR"; chmod 700 "$WORKERS_DIR"; }
-
 read_field() {
   grep "\"$2\"" "$1" | sed 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\{0,1\}\([^",}]*\)"\{0,1\}.*/\1/' | sed 's/[[:space:]]*$//'
 }
 
-# ---------------------------------------------------------------- JSON writers
+# The bundle's own scripts run on bun, so the installer always places one. Prefer a bun on PATH,
+# then the private copy the installer fetched.
+find_bun() {
+  if command -v bun >/dev/null 2>&1; then command -v bun; return 0; fi
+  [ -x "$ROOT/bin/bun" ] && { printf '%s\n' "$ROOT/bin/bun"; return 0; }
+  return 1
+}
 
-write_worker_cli() {
-  ensure_workers_dir; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  cat > "$WORKERS_DIR/$1.json" <<ENDJSON
+# Which worker CLIs are installed, named the way the bundle's catalogue names them (`cli:`), not the
+# way the binary is named — the claude-code families dispatch the `claude` binary.
+installed_clis() {
+  command -v claude >/dev/null 2>&1 && printf 'claude-code\n'
+  command -v codex  >/dev/null 2>&1 && printf 'codex\n'
+  command -v agy    >/dev/null 2>&1 && printf 'agy\n'
+  return 0
+}
+
+# The bridge reads the registry when it starts, so a change while it is running is invisible until
+# it restarts. On a minimal install it is not running and there is nothing to do.
+restart_bridge_if_running() {
+  _stop="$ROOT/current/stop-host-worker-bridge.sh"
+  _start="$ROOT/current/start-host-worker-bridge.sh"
+  [ -x "$_stop" ] && [ -x "$_start" ] || return 0
+  pgrep -f 'host-worker-bridge' >/dev/null 2>&1 || return 0
+  if (cd "$ROOT/current" && "$_stop" >/dev/null 2>&1 && "$_start" >/dev/null 2>&1); then
+    ok "restarted the worker bridge so it picks up the change"
+  else
+    warn "could not restart the worker bridge — run: datacore restart"
+  fi
+}
+
+# ---------------------------------------------------------------- the registry program
+#
+# JSON surgery in POSIX sh is not worth attempting, and python3 is not guaranteed on a user's
+# machine, so this runs on the bun the installer always places. The program is embedded rather than
+# shipped as a separate lib/ file because the lib/ files are fetched from a release: a new file is
+# missing from every release cut before it existed, and `worker add` must not break for that.
+
+registry_tool() {
+  _bun=$(find_bun) || die "bun is not installed. Re-run the installer, or: datacore doctor"
+  [ -f "$REGISTRY" ] || die "No worker registry at $REGISTRY.
+  It is written when Datacore is installed; re-run the installer if it is missing."
+  _js="${TMPDIR:-/tmp}/datacore-worker-registry.$$.js"
+  cat > "$_js" <<'DATACORE_REGISTRY_JS'
+// Datacore worker registry surgery. Invoked by `datacore worker` and by install.sh.
+//
+// Two files, one directory:
+//   azure-worker-registry.json   the ENABLED workers — the only list the runtime dispatches to
+//   azure-worker-catalogue.json  every worker the bundle minted a token for
+//
+// The bundle writes the registry as the full cartesian product of CLI x model alias x role: 29
+// entries on a stock install, 14 of them for a CLI (agy) its own catalogue flags as out of the
+// default profile. Nobody needs 29. This keeps the full set in the catalogue, which is where
+// `enable` takes tokens from, and leaves the registry holding only what was asked for.
+const { readFileSync, writeFileSync, existsSync, chmodSync } = require("fs");
+
+const [cmd, registryPath, cataloguePath, configPath, ...rest] = process.argv.slice(2);
+
+const read = (p) => JSON.parse(readFileSync(p, "utf8"));
+const write = (p, doc) => {
+  writeFileSync(p, JSON.stringify(doc, null, 2) + "\n", "utf8");
+  try { chmodSync(p, 0o600); } catch {}
+};
+// The bridge dispatches by phase, so an entry with no phases is an identity rather than a dispatch
+// target: the MCP operator is one, and it carries cli:"claude-code" like any worker, so testing the
+// cli field would drop it and take the client's MCP token with it. Phases are the real distinction.
+// Identities are never candidates for enable/disable and are never pruned.
+const isInfra = (w) => !(w.phases || []).length;
+const familyOf = (w) => String(w.agent_id || "").split("@")[0];
+const die = (m) => { console.error(m); process.exit(1); };
+
+// The bundle's own catalogue of worker families, read out of its minified config. This is the
+// source of truth for which families are in the default profile and which alias each one defaults
+// to; hardcoding either here would drift from the bundle on every release.
+function families(path) {
+  const out = new Map();
+  if (!path || !existsSync(path)) return out;
+  const s = readFileSync(path, "utf8");
+  for (const m of s.matchAll(/agentFamily:"([^"]+)"/g)) {
+    const seg = s.slice(m.index, m.index + 2000);
+    const pick = (re) => (seg.match(re) || [])[1];
+    out.set(m[1], {
+      cli: pick(/cli:"([^"]+)"/),
+      defaultAlias: pick(/defaultModelAlias:"([^"]+)"/),
+      inDefault: /inDefaultProfile:(?:!0|true)/.test(seg),
+    });
+  }
+  return out;
+}
+
+// Pick one entry per family: the family's default alias when the catalogue names one and that
+// alias exists, else the first entry the bundle listed for the family.
+function onePerFamily(workers, fams, wantCli) {
+  const chosen = [];
+  const seen = new Set();
+  for (const w of workers) {
+    const fam = familyOf(w);
+    if (seen.has(fam)) continue;
+    const meta = fams.get(fam) || {};
+    if (wantCli && !wantCli(w, meta, fam)) continue;
+    const want = meta.defaultAlias;
+    const pick = (want && workers.find((x) => familyOf(x) === fam && x.model_alias === want)) || w;
+    seen.add(fam);
+    chosen.push(pick);
+  }
+  return chosen;
+}
+
+const summarise = (ws) => {
+  const dispatch = ws.filter((w) => !isInfra(w));
+  for (const w of dispatch) console.log(`    ${w.agent_id}  [${(w.phases || []).join(", ")}]`);
+  return dispatch.length;
+};
+
+if (!cmd || !registryPath) die("usage: worker-registry <prune|enable|disable|list> <registry> <catalogue> <config> [args]");
+if (!existsSync(registryPath)) die(`no worker registry at ${registryPath}`);
+
+const registry = read(registryPath);
+registry.workers = registry.workers || [];
+
+// The catalogue is seeded from the registry the first time, before anything is pruned away, so the
+// full minted set survives. Later runs keep whichever is larger: an upgrade rewrites the registry
+// with all 29 again, and that must not shrink a catalogue, nor lose a token the registry alone has.
+let catalogue = existsSync(cataloguePath) ? read(cataloguePath) : { ...registry, workers: [] };
+catalogue.workers = catalogue.workers || [];
 {
-  "name": "$1",
-  "kind": "cli",
-  "binary": "$2",
-  "version": "$3",
-  "model_alias": "",
-  "auth": "external",
-  "role": "both",
-  "registered_at": "$ts"
-}
-ENDJSON
+  const byId = new Map(catalogue.workers.map((w) => [w.agent_id, w]));
+  for (const w of registry.workers) if (!byId.has(w.agent_id)) byId.set(w.agent_id, w);
+  catalogue.workers = [...byId.values()];
+  if (cataloguePath) write(cataloguePath, catalogue);
 }
 
-write_worker_api() {
-  ensure_workers_dir; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  cat > "$WORKERS_DIR/$1.json" <<ENDJSON
-{
-  "name": "$1",
-  "kind": "api",
-  "provider": "$2",
-  "model": "$3",
-  "auth": "datacore",
-  "role": "both",
-  "registered_at": "$ts"
-}
-ENDJSON
+const fams = families(configPath);
+
+if (cmd === "list") {
+  const enabled = summarise(registry.workers);
+  const avail = catalogue.workers.filter((w) => !isInfra(w)).length - enabled;
+  console.log(`  ${enabled} enabled, ${avail} more available (datacore worker add <name>)`);
+  process.exit(0);
 }
 
-# ---------------------------------------------------------------- detection
-# Each detector prints pipe-delimited records: kind|name|detail|extra
-
-detect_cli() {
-  for _n in claude codex agy; do
-    _b=$(command -v "$_n" 2>/dev/null) || continue
-    _abs=$(cd "$(dirname "$_b")" 2>/dev/null && pwd)/"$(basename "$_b")" || _abs="$_b"
-    _v=$("$_abs" --version 2>/dev/null | head -1 | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//') || _v=""
-    printf 'cli|%s|%s|%s\n' "$_n" "$_abs" "${_v:-version unknown}"
-  done
+if (cmd === "prune") {
+  // rest = CLI binaries that resolve on this machine, as the family `cli` names them.
+  const present = new Set(rest.filter(Boolean));
+  const keep = onePerFamily(catalogue.workers, fams, (w, meta, fam) => {
+    if (isInfra(w)) return false;
+    if (!meta.inDefault) return false;             // agy: the bundle itself flags it opt-in
+    return present.has(meta.cli || w.cli);          // and the CLI has to actually be installed
+  });
+  registry.workers = [...catalogue.workers.filter(isInfra), ...keep];
+  write(registryPath, registry);
+  const n = summarise(registry.workers);
+  console.log(`  ${n} worker(s) enabled of ${catalogue.workers.filter((w) => !isInfra(w)).length} the bundle minted`);
+  process.exit(0);
 }
 
-detect_api() {
-  [ -d "$PROVIDERS_DIR" ] || return 0
-  for _c in "$PROVIDERS_DIR"/*.json; do
-    [ -f "$_c" ] || continue
-    _pn=$(read_field "$_c" name); [ -n "$_pn" ] || continue
-    printf 'api|%s|API provider|%s\n' "$_pn" "$(read_field "$_c" model)"
-  done
+if (cmd === "enable" || cmd === "disable") {
+  const sel = rest[0];
+  if (!sel) die(`usage: datacore worker ${cmd === "enable" ? "add" : "remove"} <cli|family|family@alias>`);
+  const [selName, selAlias] = sel.split("@");
+  // A selector names a CLI (codex), a family (codex-review) or one exact worker (codex-review@gpt-6-luna).
+  const matches = (w) => {
+    const fam = familyOf(w);
+    const meta = fams.get(fam) || {};
+    const hit = fam === selName || (meta.cli || w.cli) === selName || w.cli === selName;
+    return hit && (!selAlias || w.model_alias === selAlias);
+  };
+
+  if (cmd === "disable") {
+    const before = registry.workers.length;
+    registry.workers = registry.workers.filter((w) => isInfra(w) || !matches(w));
+    if (registry.workers.length === before) die(`Nothing enabled matches '${sel}'. Run: datacore worker list`);
+    write(registryPath, registry);
+    console.log(`  removed ${before - registry.workers.length} worker(s)`);
+    summarise(registry.workers);
+    process.exit(0);
+  }
+
+  const pool = catalogue.workers.filter((w) => !isInfra(w) && matches(w));
+  if (!pool.length) {
+    const names = [...new Set(catalogue.workers.filter((w) => !isInfra(w)).map((w) => familyOf(w)))];
+    die(`No worker matches '${sel}'.\n  Known: ${names.join(", ")}`);
+  }
+  // Without an explicit alias, take one worker per family rather than every alias of it — the
+  // whole point of this file is that `add codex` must not put eight more workers in the registry.
+  const add = selAlias ? pool : onePerFamily(pool, fams);
+  const have = new Set(registry.workers.map((w) => w.agent_id));
+  const fresh = add.filter((w) => !have.has(w.agent_id));
+  if (!fresh.length) { console.log(`  already enabled: ${add.map((w) => w.agent_id).join(", ")}`); process.exit(0); }
+  registry.workers = [...registry.workers, ...fresh];
+  write(registryPath, registry);
+  console.log(`  enabled ${fresh.length} worker(s)`);
+  summarise(registry.workers);
+  process.exit(0);
 }
 
-# ---------------------------------------------------------------- registration
-
-# Register one pipe-delimited record. Returns 1 on unknown kind (safe for --all).
-register_one() {
-  _k=$(printf '%s' "$1" | cut -d'|' -f1)
-  _rn=$(printf '%s' "$1" | cut -d'|' -f2)
-  _dt=$(printf '%s' "$1" | cut -d'|' -f3)
-  _ex=$(printf '%s' "$1" | cut -d'|' -f4)
-  case "$_k" in
-    cli) write_worker_cli "$_rn" "$_dt" "$_ex"
-         ok "worker '$_rn' registered (cli — no credential stored, uses your own login)" ;;
-    api) write_worker_api "$_rn" "$_rn" "$_ex"
-         ok "worker '$_rn' registered (api — key held by Datacore)" ;;
-    *)   warn "unknown kind '$_k' for '$_rn' — skipped"; return 1 ;;
-  esac
-}
-
-# Register every line in a file; report failures but do not abort.
-register_all_from() {
-  _errs=0
-  while IFS= read -r _ln; do
-    [ -n "$_ln" ] || continue
-    register_one "$_ln" || _errs=$((_errs + 1))
-  done < "$1"
-  [ "$_errs" -eq 0 ] || warn "$_errs registration(s) failed. Others were saved."
-  say "  Run: datacore worker list"
-}
-
-# Print numbered menu lines to stdout.
-print_menu() {
-  _i=0
-  while IFS= read -r _ln; do
-    [ -n "$_ln" ] || continue
-    _i=$((_i + 1))
-    printf '  %d  %-10s  %-38s  %s\n' "$_i" \
-      "$(printf '%s' "$_ln" | cut -d'|' -f2)" \
-      "$(printf '%s' "$_ln" | cut -d'|' -f3)" \
-      "$(printf '%s' "$_ln" | cut -d'|' -f4)"
-  done < "$1"
+die(`unknown command '${cmd}'`);
+DATACORE_REGISTRY_JS
+  # Variadic on purpose: `prune` takes one argument per installed CLI, and on a machine with none
+  # it takes zero. Positional "$2" "$3" "$4" would trip `set -u` in exactly that case.
+  _cmd="$1"; shift
+  _rc=0
+  "$_bun" "$_js" "$_cmd" "$REGISTRY" "$CATALOGUE" "$BUNDLE_CONFIG" "$@" || _rc=$?
+  rm -f "$_js"
+  return $_rc
 }
 
 # ---------------------------------------------------------------- subcommand: add
 
 cmd_add() {
-  arg="${1:-}"
-  _tmp=$(mktemp)
-  trap 'rm -f "$_tmp"' EXIT INT TERM
+  sel="${1:-}"
 
-  detect_cli >> "$_tmp"
-  detect_api >> "$_tmp"
-
-  _total=$(grep -c '' "$_tmp" 2>/dev/null) || _total=0
-
-  if [ "$_total" -eq 0 ]; then
-    say "Nothing found on this machine."
-    say "  Install a CLI (claude, codex, agy) or run: datacore provider add meta"
-    say "  Then retry: datacore worker add"
-    rm -f "$_tmp"; trap - EXIT INT TERM; exit 0
-  fi
-
-  # --all
-  if [ "$arg" = "--all" ]; then
-    register_all_from "$_tmp"
-    rm -f "$_tmp"; trap - EXIT INT TERM; return 0
-  fi
-
-  # named argument
-  if [ -n "$arg" ]; then
-    _m=$(grep "^[^|]*|$arg|" "$_tmp") || true
-    rm -f "$_tmp"; trap - EXIT INT TERM
-    [ -n "$_m" ] || { printf "No detected worker named '%s'. Run: datacore worker add\n" "$arg" >&2; exit 1; }
-    register_one "$_m" && say "  Run: datacore worker list"
+  if [ -z "$sel" ]; then
+    say "Enabled now:"
+    registry_tool list
+    say ""
+    _found=$(installed_clis | tr '\n' ' ')
+    if [ -n "$_found" ]; then
+      say "Worker CLIs installed on this machine: $_found"
+      say "  Enable one:  datacore worker add codex"
+    else
+      say "No worker CLI found on this machine (looked for: claude, codex, agy)."
+      say "  Install one, then: datacore worker add <name>"
+    fi
+    say "  One model API:  datacore provider add meta"
     return 0
   fi
 
-  # non-interactive stdin: list and advise
-  if [ ! -t 0 ]; then
-    say "Found on this machine:"; say ""
-    print_menu "$_tmp"; say ""
-    say "Re-run with a name or '--all':  datacore worker add --all"
-    rm -f "$_tmp"; trap - EXIT INT TERM; exit 0
-  fi
-
-  # interactive menu
-  say ""; say "Found on this machine:"; say ""
-  print_menu "$_tmp"
-  say ""; printf "Add which? [number, or 'all']: " >&2
-  read -r _ch
-
-  if [ "$_ch" = "all" ]; then
-    register_all_from "$_tmp"
-    rm -f "$_tmp"; trap - EXIT INT TERM; return 0
-  fi
-
-  case "$_ch" in
-    *[!0-9]*|'') rm -f "$_tmp"; trap - EXIT INT TERM
-                 die "Invalid choice '$_ch'. Run: datacore worker add" ;;
+  # Enabling a worker whose CLI is absent is allowed — a machine can be prepared before the tool is
+  # installed — but it will not dispatch until the binary resolves, so say so rather than imply
+  # the worker is ready.
+  _cli=$(printf '%s' "$sel" | cut -d@ -f1)
+  case "$_cli" in
+    claude-code|claude-worker|claude-review) _bin=claude ;;
+    codex|codex-worker|codex-review)         _bin=codex ;;
+    agy|agy-review)                          _bin=agy ;;
+    *)                                       _bin='' ;;
   esac
-  if [ "$_ch" -lt 1 ] || [ "$_ch" -gt "$_total" ]; then
-    rm -f "$_tmp"; trap - EXIT INT TERM
-    die "Choice $_ch out of range (1–$_total). Run: datacore worker add"
-  fi
 
-  _sel=$(sed -n "${_ch}p" "$_tmp")
-  rm -f "$_tmp"; trap - EXIT INT TERM
-  register_one "$_sel" && say "  Run: datacore worker list"
+  registry_tool enable "$sel" || exit $?
+  if [ -n "$_bin" ] && ! command -v "$_bin" >/dev/null 2>&1; then
+    warn "the '$_bin' command is not on PATH, so nothing will be dispatched to it yet"
+  fi
+  restart_bridge_if_running
+  say "  Run: datacore worker list"
 }
 
 # ---------------------------------------------------------------- subcommand: list
 
 cmd_list() {
-  _found=0
-  if [ -d "$WORKERS_DIR" ]; then
-    for _c in "$WORKERS_DIR"/*.json; do
-      [ -f "$_c" ] || continue; _found=$((_found + 1))
-      _name=$(read_field "$_c" name); _kind=$(read_field "$_c" kind)
-      if [ "$_kind" = "cli" ]; then
-        printf '  %-12s  cli  %s  (%s)\n' "$_name" "$(read_field "$_c" binary)" "$(read_field "$_c" version)"
-        say "               auth: no credential stored — uses your own login"
-      elif [ "$_kind" = "api" ]; then
-        printf '  %-12s  api  provider=%s  model=%s\n' "$_name" "$(read_field "$_c" provider)" "$(read_field "$_c" model)"
-        say "               auth: datacore (key held by Datacore)"
-      else
-        printf '  %-12s  (unknown kind)\n' "$_name"
-      fi
-      printf '               registered: %s\n' "$(read_field "$_c" registered_at)"
+  say "Workers the runtime will dispatch to:"
+  registry_tool list
+
+  if [ -d "$PROVIDERS_DIR" ]; then
+    _any=0
+    for _c in "$PROVIDERS_DIR"/*.json; do
+      [ -f "$_c" ] || continue
+      [ "$_any" = 0 ] && { say ""; say "Model API providers:"; _any=1; }
+      printf '    %-18s model=%s\n' "$(read_field "$_c" name)" "$(read_field "$_c" model)"
     done
   fi
-  if [ "$_found" -eq 0 ]; then
-    say "No workers registered.  Run: datacore worker add"; exit 0
-  fi
+
+  # Two things gate dispatch besides the registry, and both are quiet failures, so name them here
+  # rather than let the user discover an enabled worker that never picks anything up.
+  say ""
+  say "  Before anything is dispatched: the worker's CLI must resolve on PATH"
+  say "  (check: datacore doctor), and DATACORE_WORKER_PROJECT_WORKSPACES in"
+  say "  $ROOT/current/.env must map your project name to a git repository."
 }
 
 # ---------------------------------------------------------------- subcommand: remove
@@ -214,12 +315,20 @@ cmd_list() {
 cmd_remove() {
   _name="${1:-}"
   [ -n "$_name" ] || { say "Usage: datacore worker remove <name>" >&2; exit 2; }
-  _c="$WORKERS_DIR/$_name.json"
-  if [ ! -f "$_c" ]; then
-    printf "No worker named '%s'. Run: datacore worker list\n" "$_name" >&2; exit 1
-  fi
-  rm -f "$_c"
-  ok "removed worker '$_name'"; say "  Run: datacore worker list"
+  registry_tool disable "$_name" || exit $?
+  restart_bridge_if_running
+  say "  Run: datacore worker list"
+}
+
+# ---------------------------------------------------------------- subcommand: prune
+
+# Reset the registry to the lean default: one worker per family the bundle flags as in its default
+# profile, for CLIs that are actually installed. The installer calls this; it is also the way back
+# from having enabled too much.
+cmd_prune() {
+  # shellcheck disable=SC2046  # deliberate word splitting: one argument per installed CLI
+  registry_tool prune $(installed_clis | tr '\n' ' ') || exit $?
+  restart_bridge_if_running
 }
 
 # ---------------------------------------------------------------- usage
@@ -229,13 +338,20 @@ usage() {
 Usage: datacore worker <subcommand> [args...]
 
 Subcommands:
-  add [name|--all]   detect and register AI coding tool workers
-  list               list registered workers
-  remove <name>      unregister a worker
+  add [name]       enable a worker: a CLI (codex), a family (codex-review),
+                   or one exact worker (codex-review@gpt-6-luna).
+                   With no name, show what is enabled and what is available.
+  list             show the workers the runtime will dispatch to
+  remove <name>    disable a worker
+  prune            reset to the lean default — one worker per default-profile
+                   family, for the worker CLIs installed on this machine
 
-Workers are optional. A worker is either:
-  cli  — a local AI CLI (claude, codex, agy); Datacore never stores its credentials.
-  api  — a configured provider (from `datacore provider add`); Datacore holds the key.
+The bundle mints a token for every CLI x model x role combination it knows (29 of them). They are
+kept in a catalogue beside the registry; these subcommands move workers between the two, so
+enabling one never needs new credentials and disabling one never destroys any.
+
+Datacore stores no credential for a worker CLI — it uses your own login for that tool. A model API
+provider (datacore provider add) is the other kind, and there Datacore does hold the key.
 EOF
   exit 0
 }
@@ -248,5 +364,6 @@ case "$subcmd" in
   add)    cmd_add    "$@" ;;
   list)   cmd_list   "$@" ;;
   remove) cmd_remove "$@" ;;
+  prune)  cmd_prune  "$@" ;;
   *) printf 'Unknown subcommand: %s\nRun: datacore worker --help\n' "$subcmd" >&2; exit 2 ;;
 esac

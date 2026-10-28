@@ -56,9 +56,10 @@ run Docker's post-install step — the installer tells you the command.
 5. Shows the licence terms and records your acceptance
 6. Has Datacore generate its own configuration and service identities
 7. Starts Datacore and waits until it reports healthy
-8. Registers Datacore with every AI client it finds, and **verifies the connection works**
-9. On macOS, sets Datacore to **start automatically at login**
-10. Prints one next step
+8. Trims the worker registry to the CLIs you actually have, keeping the rest in a catalogue
+9. Registers Datacore with every AI client it finds, and **verifies the connection works**
+10. On macOS, sets Datacore to **start automatically at login**
+11. Prints one next step
 
 Nothing is hand-edited. You will not be asked to open a file in an editor.
 
@@ -69,14 +70,36 @@ Nothing is hand-edited. You will not be asked to open a file in an editor.
 
   Runtime    http://127.0.0.1:43123
   MCP        Claude Code
-  Profile    minimal — workers off, gateway off
+  Workers    2 enabled
+  Gateway    off
 
   Next: restart Claude Code, then ask it "what tasks do I have?"
-  Later: datacore worker add codex    (let Datacore drive coding agents)
+  Later: datacore worker list    (see them), datacore worker add <name>    (enable more)
 ```
 
 A minimal install is a complete product: memory, tasks and search inside your AI client. Model
 execution is opt-in and configured later, only if you want it.
+
+### Workers
+
+A worker is an AI coding CLI that Datacore dispatches work to. Datacore mints a token for every
+CLI × model × role combination it knows — 29 of them — which is far more than anyone wants
+enabled. The installer therefore enables a lean set: **one implementation worker and one reviewer
+per CLI you actually have installed**, and only for the families Datacore ships in its default
+profile. The rest stay in a catalogue beside the registry, so enabling one later needs no new
+credentials.
+
+```bash
+datacore worker list                       # what will be dispatched to
+datacore worker add codex                  # enable a CLI (one worker, one reviewer)
+datacore worker add codex-review@gpt-6-sol # or one exact model
+datacore worker remove agy                 # disable
+datacore worker prune                      # back to the lean default
+```
+
+Two things gate dispatch besides the registry, and both fail quietly: the worker's CLI has to
+resolve on `PATH` (`datacore doctor` checks this), and `DATACORE_WORKER_PROJECT_WORKSPACES` in the
+bundle `.env` has to map your project name to a git repository.
 
 ### Starting at login
 
@@ -101,7 +124,8 @@ yourself, or add it to your own session startup.
 | `datacore logs` | tail component logs |
 | `datacore stop` / `start` | stop and start the stack |
 | `datacore provider add <name>` | configure a model API key |
-| `datacore worker add <cli>` | register a local AI CLI as a worker |
+| `datacore worker list` | the workers the runtime will dispatch to |
+| `datacore worker add <name>` | enable a worker CLI, family, or one exact model |
 | `datacore update` | fetch the latest release and upgrade in place, rolling back on failure |
 | `datacore uninstall` | remove the containers, client entries, login agent and install |
 
@@ -115,8 +139,8 @@ Two routes, and you can use either or both.
 datacore provider add meta
 ```
 
-**An AI CLI you already pay for** — Datacore runs it as a worker. It stores only the path and the
-model name:
+**An AI CLI you already pay for** — Datacore runs it as a worker, using your own login for that
+tool:
 
 ```bash
 datacore worker add codex

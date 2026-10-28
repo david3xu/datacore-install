@@ -43,6 +43,7 @@ SELF_DIR=""
 BUNDLE_DIR=""
 SUMS_FILE=""
 PREVIOUS_DIR=""
+WORKERS_SUMMARY="left as generated"
 
 # ---------------------------------------------------------------- output helpers
 
@@ -399,6 +400,38 @@ Diagnose:    $BIN_DIR/datacore doctor"
 # Checks that only describe an unconfigured optional worker CLI. Everything else is blocking.
 WORKER_LAUNCHER_CHECK='^bridge_dispatch:launcher:'
 
+# ---------------------------------------------------------------- 5b. trim the worker registry
+#
+# The bundle writes its worker registry as the full cartesian product of worker CLI x model alias x
+# role: 29 entries, every one with a live token, on a machine that may have none of those CLIs
+# installed. Fourteen of them are for a CLI the bundle's own catalogue flags as outside the default
+# profile. That is not a configuration anybody chose, and it is the first thing a new user sees when
+# they ask what workers they have.
+#
+# `datacore worker prune` keeps one worker per default-profile family, for the CLIs actually
+# installed here, and moves the rest to a catalogue file beside the registry so `datacore worker
+# add` can enable any of them later without minting anything.
+lean_workers() {
+  _w="$BIN_DIR/lib/worker.sh"
+  if [ ! -f "$_w" ]; then
+    info "worker registry left as generated — this release does not carry lib/worker.sh"
+    return 0
+  fi
+  # An older lib/worker.sh has no `prune` verb. Losing the trim is cosmetic, so report and move on
+  # rather than fail an install whose runtime is already up and healthy.
+  if ! _out=$(DATACORE_INSTALL_ROOT="$INSTALL_ROOT" DATACORE_HOME="$DATA_HOME" sh "$_w" prune 2>/dev/null); then
+    info "worker registry left as generated (trim it with: datacore worker prune)"
+    return 0
+  fi
+  printf '%s\n' "$_out"
+  _n=$(printf '%s\n' "$_out" | sed -n 's/^  \([0-9]\{1,\}\) worker(s) enabled.*/\1/p' | tail -1)
+  if [ "${_n:-0}" = 0 ]; then
+    WORKERS_SUMMARY="none — no worker CLI installed (claude, codex, agy)"
+  else
+    WORKERS_SUMMARY="$_n enabled"
+  fi
+}
+
 gate_on_doctor() {
   _dlog="${TMPDIR:-/tmp}/datacore-doctor.$$.log"
   "$BUNDLE_DIR/doctor.sh" >"$_dlog" 2>&1 || true
@@ -588,14 +621,16 @@ main() {
   step "Checking your machine";      detect_platform; ensure_container_runtime; ensure_bun
   step "Downloading";                download_and_verify
   step "Licence";                    accept_eula
+  step "Installing the command";     install_command
   step "Configuring";                prepare_env
   if [ "${DATACORE_SKIP_START:-0}" = 1 ]; then
     step "Starting"; info "skipped (DATACORE_SKIP_START)"; RUNTIME_URL="(not started)"
   else
     step "Starting"; start_stack
   fi
+  step "Workers";                    lean_workers
   step "Connecting your AI clients"; register_clients
-  step "Finishing";                  install_command; install_login_agent
+  step "Finishing";                  install_login_agent
 
   ver=$(basename "$BUNDLE_DIR" | sed 's/^datacore-local-edition-//')
   cat <<EOF
@@ -604,10 +639,11 @@ ${B}✓ Datacore $ver is running${R}
 
   Runtime    $RUNTIME_URL
   MCP        ${REGISTERED:-not registered}
-  Profile    minimal — workers off, gateway off
+  Workers    ${WORKERS_SUMMARY}
+  Gateway    off
 
   Next: restart ${REGISTERED:-your AI client}, then ask it "what tasks do I have?"
-  Later: datacore worker add codex    (let Datacore drive coding agents)
+  Later: datacore worker list    (see them), datacore worker add <name>    (enable more)
 
 EOF
 }
