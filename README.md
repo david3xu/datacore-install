@@ -63,11 +63,12 @@ Nothing is hand-edited. You will not be asked to open a file in an editor.
 ```
 ✓ Datacore 0.1.77 is running
 
-  Runtime    http://127.0.0.1:53123        healthy
-  MCP        Claude Code (front_door)      verified
+  Runtime    http://127.0.0.1:43123
+  MCP        Claude Code
   Profile    minimal — workers off, gateway off
 
   Next: restart Claude Code, then ask it "what tasks do I have?"
+  Later: datacore worker add codex    (let Datacore drive coding agents)
 ```
 
 A minimal install is a complete product: memory, tasks and search inside your AI client. Model
@@ -81,7 +82,6 @@ execution is opt-in and configured later, only if you want it.
 | `datacore doctor` | diagnose problems, with remediation |
 | `datacore logs` | tail component logs |
 | `datacore stop` / `start` | stop and start the stack |
-| `datacore enable workers` | let Datacore drive coding agents |
 | `datacore provider add <name>` | configure a model API key |
 | `datacore worker add <cli>` | register a local AI CLI as a worker |
 | `datacore update` | upgrade in place, with rollback |
@@ -121,8 +121,9 @@ and — on explicit confirmation — your Datacore data directory.
 
 ## Support
 
-Open an issue in this repository. `datacore doctor --bundle` produces a redacted diagnostic
-archive you can attach; it contains no keys or tokens.
+Open an issue in this repository, and paste the output of `datacore doctor`. It prints one line
+per check with the reason and the remediation, and never prints a key or a token — but it does
+name local paths and ports, so read it before you post it.
 
 ## Licence
 

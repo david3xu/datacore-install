@@ -24,7 +24,7 @@ fi
 die() { printf '%s\n' "$1" >&2; exit 1; }
 
 not_yet() {
-  printf "datacore %s: not available yet (%s).\n" "$1" "$2" >&2
+  printf 'datacore %s: not available yet. %s\n' "$1" "$2" >&2
   exit 2
 }
 
@@ -77,8 +77,8 @@ Workers:
   worker      register a local AI CLI or API provider as a worker (add/list/remove)
 
 Not yet available:
-  connect     register Datacore with an AI client (D4)
-  enable      enable optional feature profiles, e.g. workers (D5)
+  connect     register Datacore with an AI client (the installer does this for you)
+  enable      turn on optional feature profiles
 EOF
   exit 0
 }
@@ -101,8 +101,8 @@ case "$verb" in
   update)    run_bundle_script update    update-datacore-local.sh    "$@" ;;
   uninstall) run_bundle_script uninstall uninstall-datacore-local.sh "$@" ;;
 
-  connect)  not_yet connect  "D4" ;;
-  enable)   not_yet enable   "D5" ;;
+  connect)  not_yet connect "Re-run the installer; it registers every AI client it finds." ;;
+  enable)   not_yet enable  "Workers are turned on with: datacore worker add" ;;
   provider) run_lib_script provider.sh "$@" ;;
   worker)   run_lib_script worker.sh   "$@" ;;
 

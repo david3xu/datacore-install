@@ -15,8 +15,6 @@
 #   DATACORE_SKIP_CLIENT_REGISTRATION=1  do not touch AI client config (proof runs)
 #   DATACORE_SKIP_START=1   install and configure, but start no containers (proof runs)
 #
-# NOTE: step 3 (download) requires the release pipeline (work unit D1). Until a release is
-# published, this script fails at that step with a clear message. Every other step is live.
 
 set -eu
 
@@ -256,7 +254,7 @@ prepare_env() {
 
   # Compose derives its project name from the directory, which is the 'current' symlink. Pinning it
   # stops a hand-run 'docker compose' here from forking a second stack. It does not rename the
-  # bundle's own stack: `local-compose.ts` hard-codes `datacore-local` for that.
+  # bundle's own stack, which uses a fixed project name of its own.
   grep -q '^COMPOSE_PROJECT_NAME=' .env || printf 'COMPOSE_PROJECT_NAME=%s\n' "$COMPOSE_PROJECT" >> .env
   ok "configuration prepared (nothing for you to edit)"
 }
@@ -319,8 +317,9 @@ Re-run:      $BUNDLE_DIR/doctor.sh"
 
 # ---------------------------------------------------------------- 6. register AI clients
 
-# Probe (token, bundle) with a real JSON-RPC initialize. The bundle shipped in 0.1.76 requests
-# a bundle its own minted token is not granted, so never assume — try richest first and verify.
+# Probe (token, bundle) with a real JSON-RPC initialize. Which tool bundle a minted token may use
+# depends on the identity it authenticates as, which varies between installs, so never assume:
+# try the richest bundle first and register only what a real handshake accepts.
 mcp_bundle_works() {
   curl -fsS -m 10 -X POST "$RUNTIME_URL/mcp" \
     -H "Authorization: Bearer $1" \
