@@ -19,7 +19,7 @@
 set -eu
 
 VERSION="${DATACORE_VERSION:-latest}"
-RELEASE_BASE="${DATACORE_RELEASE_BASE:-https://github.com/REPLACE_ME/datacore-install/releases}"
+RELEASE_BASE="${DATACORE_RELEASE_BASE:-https://github.com/david3xu/datacore-install/releases}"
 INSTALL_ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
 DATA_HOME="${DATACORE_HOME:-$HOME/.datacore-local}"
 COMPOSE_PROJECT="${DATACORE_COMPOSE_PROJECT:-datacore-local}"
@@ -92,10 +92,6 @@ sha256_of() {
 fetch() { curl -fsSL --retry 3 -o "$2" "$1"; }
 
 download_and_verify() {
-  case "$RELEASE_BASE" in
-    *REPLACE_ME*) die "No release is published yet." "The release pipeline (work unit D1) has not run, so there is nothing to download. Set DATACORE_RELEASE_BASE to a real release URL to test this script." ;;
-  esac
-
   TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
   if [ "$VERSION" = latest ]; then rel="$RELEASE_BASE/latest/download"; else rel="$RELEASE_BASE/download/$VERSION"; fi
 
