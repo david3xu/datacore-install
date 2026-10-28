@@ -9,7 +9,9 @@
 #   DATACORE_INSTALL_ROOT   where versions are kept (default: ~/.datacore)
 #   DATACORE_HOME           runtime data directory (default: ~/.datacore-local)
 #   DATACORE_ACCEPT_EULA=1  skip the interactive licence prompt (CI)
-#   DATACORE_COMPOSE_PROJECT         compose project name (default: datacore-local)
+#   DATACORE_COMPOSE_PROJECT         COMPOSE_PROJECT_NAME written to .env (default: datacore-local).
+#                                    The bundle hard-codes its own project name, so this does not
+#                                    rename the stack; two stacks need two Docker daemons.
 #   DATACORE_SKIP_CLIENT_REGISTRATION=1  do not touch AI client config (proof runs)
 #   DATACORE_SKIP_START=1   install and configure, but start no containers (proof runs)
 #
@@ -252,8 +254,9 @@ prepare_env() {
     info "set a default worker workspace map (change it with: datacore worker add)"
   fi
 
-  # Compose derives its project name from the directory, which is the 'current' symlink.
-  # Pinning it stops a hand-run 'docker compose' from forking a second stack.
+  # Compose derives its project name from the directory, which is the 'current' symlink. Pinning it
+  # stops a hand-run 'docker compose' here from forking a second stack. It does not rename the
+  # bundle's own stack: `local-compose.ts` hard-codes `datacore-local` for that.
   grep -q '^COMPOSE_PROJECT_NAME=' .env || printf 'COMPOSE_PROJECT_NAME=%s\n' "$COMPOSE_PROJECT" >> .env
   ok "configuration prepared (nothing for you to edit)"
 }
