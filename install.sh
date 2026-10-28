@@ -25,6 +25,12 @@ DATA_HOME="${DATACORE_HOME:-$HOME/.datacore-local}"
 COMPOSE_PROJECT="${DATACORE_COMPOSE_PROJECT:-datacore-local}"
 BIN_DIR="$INSTALL_ROOT/bin"
 
+# The bundle's own scripts run on bun, so a machine with only Docker cannot start Datacore.
+# The installer provisions a private copy rather than asking the user to install a toolchain.
+# Keep these in step with the bun the bundle's JavaScript was built with.
+BUN_IMAGE="${DATACORE_BUN_IMAGE:-oven/bun:1.3}"
+BUN_VERSION="${DATACORE_BUN_VERSION:-1.3.13}"
+
 # Resolve our own directory before anything cd's: $0 may be relative, and later steps change
 # the working directory. BUNDLE_DIR is the real versioned path; never drive the bundle through
 # the 'current' symlink, because its own tooling re-points that symlink from basename($PWD).
@@ -79,6 +85,69 @@ ensure_container_runtime() {
     return
   fi
   die "Docker is installed but its daemon is not reachable." "$(docker_install_hint)"
+}
+
+# ---------------------------------------------------------------- 2b. bun
+
+# Linux: take the binary out of the official bun image. Docker is already required, the image
+# carries a glibc build for the host architecture, and this needs no unzip and no package manager.
+bun_from_docker() {
+  docker pull -q "$BUN_IMAGE" >/dev/null 2>&1 || return 1
+  _cid=$(docker create "$BUN_IMAGE" 2>/dev/null) || return 1
+  docker cp "$_cid:/usr/local/bin/bun" "$BIN_DIR/bun.new" >/dev/null 2>&1 || {
+    docker rm -f "$_cid" >/dev/null 2>&1 || true
+    return 1
+  }
+  docker rm -f "$_cid" >/dev/null 2>&1 || true
+}
+
+# macOS: the official zip. unzip ships with macOS, so nothing has to be installed first.
+bun_from_release() {
+  case "$PLATFORM_ARCH" in
+    arm64) _zip=bun-darwin-aarch64 ;;
+    amd64) _zip=bun-darwin-x64 ;;
+    *) return 1 ;;
+  esac
+  _tmp=$(mktemp -d) || return 1
+  if fetch "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/$_zip.zip" "$_tmp/bun.zip" \
+     && unzip -q -o -j "$_tmp/bun.zip" "$_zip/bun" -d "$_tmp" \
+     && mv "$_tmp/bun" "$BIN_DIR/bun.new"; then
+    rm -rf "$_tmp"
+  else
+    rm -rf "$_tmp"; return 1
+  fi
+}
+
+ensure_bun() {
+  if command -v bun >/dev/null 2>&1; then ok "bun $(bun --version 2>/dev/null)"; return; fi
+
+  mkdir -p "$BIN_DIR"
+  if [ -x "$BIN_DIR/bun" ] && "$BIN_DIR/bun" --version >/dev/null 2>&1; then
+    PATH="$BIN_DIR:$PATH"; export PATH
+    ok "bun $("$BIN_DIR/bun" --version) (private copy from an earlier install)"
+    return
+  fi
+
+  info "bun is not installed — fetching a private copy into $BIN_DIR (nothing system-wide)"
+  if [ "$PLATFORM_OS" = linux ]; then
+    bun_from_docker || die "Could not obtain bun." \
+      "Datacore's own scripts run on bun. Install it yourself and run this installer again:
+
+  curl -fsSL https://bun.sh/install | bash"
+  else
+    bun_from_release || die "Could not obtain bun." \
+      "Datacore's own scripts run on bun. Install it yourself and run this installer again:
+
+  curl -fsSL https://bun.sh/install | bash"
+  fi
+
+  chmod +x "$BIN_DIR/bun.new"
+  mv -f "$BIN_DIR/bun.new" "$BIN_DIR/bun"
+  PATH="$BIN_DIR:$PATH"; export PATH
+  _ver=$("$BIN_DIR/bun" --version 2>&1) || die "The bun copy we fetched does not run on this machine." \
+    "$BIN_DIR/bun --version said:
+     $_ver"
+  ok "bun $_ver (private copy, $BIN_DIR)"
 }
 
 # ---------------------------------------------------------------- 3. download + verify
@@ -272,7 +341,7 @@ install_command() {
 
 main() {
   say ""; say "${B}Installing Datacore${R}"
-  step "Checking your machine";      detect_platform; ensure_container_runtime
+  step "Checking your machine";      detect_platform; ensure_container_runtime; ensure_bun
   step "Downloading";                download_and_verify
   step "Licence";                    accept_eula
   step "Configuring";                prepare_env

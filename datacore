@@ -11,6 +11,14 @@ set -eu
 ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
 C="$ROOT/current"
 
+# The bundle scripts exec `bun`. On a machine without it the installer put a private copy next to
+# this script, so put our own directory on PATH rather than making the user edit their shell rc.
+_SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || _SELF_DIR=""
+if [ -n "$_SELF_DIR" ]; then
+  PATH="$_SELF_DIR:$PATH"
+  export PATH
+fi
+
 # ---------------------------------------------------------------- helpers
 
 die() { printf '%s\n' "$1" >&2; exit 1; }
