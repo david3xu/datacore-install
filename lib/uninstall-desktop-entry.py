@@ -22,16 +22,30 @@ import tempfile
 REMOVED, NOT_OURS, USAGE, ERROR = 0, 1, 2, 3
 
 
-def belongs_to_port(entry: object, port: str) -> bool:
-    """True when `port` appears in the entry as a port, not as part of a longer number.
+def belongs_to_install(entry: object, port: str, root: str = "") -> bool:
+    """True when the entry demonstrably belongs to the install identified by `port`/`root`.
 
-    A plain substring test matched too much: uninstalling the install on port 3123 would claim
-    the entry of the one on 43123.
+    Port first, matched as a number: a plain substring test claimed too much, so uninstalling
+    the install on port 3123 would take the entry of the one on 43123.
+
+    But the entry this project's installer writes is `{"command": ".../support/..."}` with no
+    port in it at all, so a port-only test could never recognise our own entry -- the installer
+    would add something the uninstaller then refused to remove. When the caller knows the
+    install root, an entry pointing inside it is ours.
     """
-    return re.search(rf"(?<!\d){re.escape(port)}(?!\d)", json.dumps(entry)) is not None
+    serialized = json.dumps(entry)
+    if port and re.search(rf"(?<!\d){re.escape(port)}(?!\d)", serialized):
+        return True
+    if root:
+        normalized = os.path.normpath(root)
+        if normalized not in ("", "/") and f'"{normalized}' in serialized.replace("\\/", "/"):
+            return True
+        if normalized not in ("", "/") and normalized in json.loads(serialized).get("command", ""):
+            return True
+    return False
 
 
-def main(path: str, port: str) -> int:
+def main(path: str, port: str, root: str = "") -> int:
     try:
         with open(path) as handle:
             config = json.load(handle)
@@ -43,7 +57,7 @@ def main(path: str, port: str) -> int:
     if not isinstance(servers, dict):
         return NOT_OURS
     entry = servers.get("datacore")
-    if entry is None or not belongs_to_port(entry, port):
+    if entry is None or not belongs_to_install(entry, port, root):
         return NOT_OURS
 
     del servers["datacore"]
@@ -70,7 +84,9 @@ def main(path: str, port: str) -> int:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("usage: uninstall-desktop-entry.py <config.json> <port>", file=sys.stderr)
+    # The third argument is optional so an older caller keeps working.
+    if len(sys.argv) not in (3, 4):
+        print("usage: uninstall-desktop-entry.py <claude_desktop_config.json> <port> [install-root]",
+              file=sys.stderr)
         raise SystemExit(USAGE)
-    raise SystemExit(main(sys.argv[1], sys.argv[2]))
+    raise SystemExit(main(sys.argv[1], sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else ""))

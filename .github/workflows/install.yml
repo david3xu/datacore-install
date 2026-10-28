@@ -370,6 +370,7 @@ jobs:
           T=$(mktemp -d)
           fail() { echo "::error::$1"; exit 1; }
           try() { set +e; python3 -I "$S" "$1" "$2" >"$T/out" 2>&1; printf '%s' "$?"; set -e; }
+          try3() { set +e; python3 -I "$S" "$1" "$2" "$3" >"$T/out" 2>&1; printf '%s' "$?"; set -e; }
 
           # Ours: the entry goes, everything else in the user's config stays.
           printf '%s' '{"mcpServers":{"other":{"command":"x"},"datacore":{"args":["http://127.0.0.1:43123/mcp"]}},"theme":"dark"}' > "$T/a.json"
@@ -411,7 +412,65 @@ jobs:
 
           set +e; python3 -I "$S" >/dev/null 2>&1; u=$?; set -e
           [ "$u" = 2 ] || fail "wrong usage should exit 2"
+
+          # The entry this installer writes is {"command": "<root>/support/..."} with no port in
+          # it, so a port-only ownership test could never recognise our own entry: the installer
+          # added something the uninstaller then refused to remove.
+          printf '%s' '{"mcpServers":{"datacore":{"command":"/opt/dc/current/support/x.sh"},"keep":{}}}' > "$T/g.json"
+          [ "$(try3 "$T/g.json" 43123 /opt/dc)" = 0 ] || fail "a command-style entry in our own root was not recognised"
+          grep -q keep "$T/g.json" || fail "another MCP server was destroyed"
+          printf '%s' '{"mcpServers":{"datacore":{"command":"/opt/dc/current/support/x.sh"}}}' > "$T/h.json"
+          [ "$(try3 "$T/h.json" 43123 /opt/other)" = 1 ] || fail "an entry under another root was claimed"
+          echo "ownership holds for both shapes: a port, and a path inside the install root"
           echo "every exit path holds: 0 removed, 1 not ours, 2 usage, 3 unreadable/unwritable"
+
+      # The bundle's writer exits 0 having written a snippet inside the bundle and never merges
+      # it, so registration always failed and the installer could only say so. The merger is the
+      # only other thing here that rewrites a file the user owns.
+      - name: The Claude Desktop merger keeps its contract
+        run: |
+          set -eu
+          M=lib/install-desktop-entry.py
+          T=$(mktemp -d)
+          fail() { echo "::error::$1"; exit 1; }
+          try() { set +e; python3 -I "$M" "$1" "$2" >"$T/out" 2>&1; printf '%s' "$?"; set -e; }
+
+          printf '%s' '{"mcpServers":{"datacore":{"command":"/opt/dc/current/support/x.sh"}}}' > "$T/snip.json"
+
+          printf '%s' '{"mcpServers":{"other":{"command":"y"}},"theme":"dark"}' > "$T/a.json"
+          [ "$(try "$T/a.json" "$T/snip.json")" = 0 ] || fail "merging into an existing config did not exit 0"
+          python3 -I -c "
+          import json; c=json.load(open('$T/a.json'))
+          assert c['mcpServers']['datacore']['command'] == '/opt/dc/current/support/x.sh', 'our entry is missing'
+          assert 'other' in c['mcpServers'], 'another MCP server was lost'
+          assert c['theme'] == 'dark', 'unrelated configuration was lost'"
+
+          # A stale entry must be replaced, not merged: half of an older install's wiring left
+          # behind is worse than either version on its own.
+          printf '%s' '{"mcpServers":{"datacore":{"command":"/old","env":{"STALE":"1"}}}}' > "$T/b.json"
+          [ "$(try "$T/b.json" "$T/snip.json")" = 0 ] || fail "replacing a stale entry did not exit 0"
+          python3 -I -c "
+          import json; e=json.load(open('$T/b.json'))['mcpServers']['datacore']
+          assert 'env' not in e, 'stale wiring survived the replace'"
+
+          [ "$(try "$T/absent.json" "$T/snip.json")" = 0 ] || fail "a config that does not exist yet should be created"
+          grep -q datacore "$T/absent.json" || fail "the created config lacks the entry"
+
+          printf '%s' '{"mcpServers":{}}' > "$T/empty.json"
+          [ "$(try "$T/empty.json" "$T/empty.json")" = 1 ] || fail "a snippet naming no server should exit 1"
+          [ "$(try "$T/empty.json" "$T/missing.json")" = 3 ] || fail "an unreadable snippet should exit 3"
+
+          # A failed rewrite must leave the user's config exactly as it was.
+          printf '%s' '{"mcpServers":{"keep":{"command":"k"}}}' > "$T/f.json"
+          cp "$T/f.json" "$T/f.expected"; chmod 500 "$T"
+          st=$(try "$T/f.json" "$T/snip.json"); chmod 700 "$T"
+          [ "$st" = 3 ] || fail "an unwritable directory should exit 3 (got $st)"
+          cmp -s "$T/f.json" "$T/f.expected" || fail "a failed merge damaged the config"
+          [ -z "$(find "$T" -name '.datacore-mcp-*')" ] || fail "a temp file was left behind"
+
+          set +e; python3 -I "$M" >/dev/null 2>&1; u=$?; set -e
+          [ "$u" = 2 ] || fail "wrong usage should exit 2"
+          echo "merger holds: 0 merged, 1 nothing named, 2 usage, 3 unreadable/unwritable"
 
   runtime-ownership:
     name: a healthy port is not accepted as proof of our runtime

@@ -127,7 +127,8 @@ remove_client_entries() {
   if [ -f "$cfg" ] && grep -q '"datacore"' "$cfg" 2>/dev/null; then
     if command -v python3 >/dev/null 2>&1; then
       cp "$cfg" "$cfg.datacore-uninstall-backup"
-      _derr=$(python3 "$LIB_DIR/uninstall-desktop-entry.py" "$cfg" "$port" 2>&1); _dstatus=$?
+      # Pass the install root too: the entry we write carries a path, not a port.
+      _derr=$(python3 "$LIB_DIR/uninstall-desktop-entry.py" "$cfg" "$port" "$ROOT" 2>&1); _dstatus=$?
       # The exit code matters: discarding the backup on *any* failure threw it away in the one
       # case it is needed -- a rewrite that did not complete.
       case "$_dstatus" in

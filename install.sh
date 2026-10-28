@@ -712,20 +712,24 @@ register_clients() {
 
   if [ -d "$HOME/Library/Application Support/Claude" ] && [ -x "$BUNDLE_DIR/write-claude-desktop-config.sh" ]; then
     _dcfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
-    # RUNTIME_URL is "(not started)" when DATACORE_SKIP_START is set, so only match on the port
-    # when there is a real one to match.
-    _dport=${RUNTIME_URL##*:}
-    case "$_dport" in ''|*[!0-9]*) _dport='' ;; esac
-    if "$BUNDLE_DIR/write-claude-desktop-config.sh" >/dev/null 2>&1 \
-       && [ -f "$_dcfg" ] \
-       && grep -q '"datacore"' "$_dcfg" 2>/dev/null \
-       && { [ -z "$_dport" ] || grep -q "$_dport" "$_dcfg" 2>/dev/null; }; then
-      # Read the entry back: the writer can exit 0 having written to a config this install does
-      # not point at, which would leave the user told they are connected when nothing is.
-      ok "registered with Claude Desktop"
-      REGISTERED="${REGISTERED:+$REGISTERED, }Claude Desktop"
+    # The bundle's writer exits 0 having written a snippet *inside the bundle*; it never merges
+    # into the user's config. So generate the snippet, then merge it here, then read it back.
+    # Before this, a Mac user who ran the installer was simply told registration had failed.
+    _dsnip="$BUNDLE_DIR/generated/claude-desktop.mcp.json"
+    if ! "$BUNDLE_DIR/write-claude-desktop-config.sh" >/dev/null 2>&1 || [ ! -f "$_dsnip" ]; then
+      info "could not generate the Claude Desktop entry"
+    elif ! command -v python3 >/dev/null 2>&1; then
+      info "python3 not available; merge $_dsnip into $_dcfg yourself"
     else
-      info "could not register with Claude Desktop"
+      _dmerr=$(python3 "$BIN_DIR/lib/install-desktop-entry.py" "$_dcfg" "$_dsnip" 2>&1)
+      case $? in
+        0) ok "registered with Claude Desktop"
+           REGISTERED="${REGISTERED:+$REGISTERED, }Claude Desktop" ;;
+        1) info "the generated Claude Desktop entry named no server; skipped" ;;
+        *) info "could not register with Claude Desktop"
+           [ -n "$_dmerr" ] && say "    $_dmerr"
+           say "    Merge it yourself: $_dsnip -> $_dcfg" ;;
+      esac
     fi
   fi
 }
@@ -735,7 +739,7 @@ register_clients() {
 # The front door is three files: the `datacore` dispatcher and the two lib scripts it execs for
 # `provider` and `worker`. Installing only the dispatcher leaves those verbs dead, so place all
 # three. Prefer siblings of this script (local run / dev); otherwise take them from the release.
-CLI_FILES="datacore lib/provider.sh lib/worker.sh lib/uninstall.sh lib/uninstall-desktop-entry.py"
+CLI_FILES="datacore lib/provider.sh lib/worker.sh lib/uninstall.sh lib/uninstall-desktop-entry.py lib/install-desktop-entry.py"
 
 install_command() {
   mkdir -p "$BIN_DIR/lib"
