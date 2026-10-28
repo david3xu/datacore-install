@@ -29,6 +29,22 @@ You do **not** need Node, Bun, Python, or any AI CLI installed to get started. D
 scripts run on bun; if your machine has none, the installer puts a private copy in
 `~/.datacore/bin` and changes nothing system-wide.
 
+## Platforms
+
+Each release carries one archive per CPU architecture, because the bundle ships container images;
+the installer picks by `uname -m`.
+
+| | |
+|---|---|
+| macOS, Apple silicon | tested |
+| Linux, x86_64 | tested on Ubuntu 24.04 |
+| Linux, arm64 | same archive as Apple silicon; not yet tested on a Linux arm64 host |
+| macOS, Intel | should work, untested |
+| Windows | not supported |
+
+On Linux, Docker must be usable by your own user. If `docker info` reports *permission denied*,
+run Docker's post-install step — the installer tells you the command.
+
 ## What the installer does
 
 1. Detects your platform and refuses clearly if it is unsupported
