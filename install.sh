@@ -767,12 +767,31 @@ register_clients() {
     return
   fi
 
+  # front_door first. It is the bundle meant for an interactive AI client -- planning, briefing,
+  # shaping and worker wakeup -- while lifecycle_operator is described by the platform as
+  # "trusted lifecycle recovery operator tools for stuck review, wake, and closure repair".
+  # Trying the recovery bundle first registered the client with it whenever it was permitted,
+  # and the planning tools then came back "not granted" with no hint why.
   BUNDLE=''
-  for candidate in lifecycle_operator front_door; do
+  for candidate in front_door lifecycle_operator; do
     if mcp_bundle_works "$CLAUDE_CODE_TOKEN" "$candidate"; then BUNDLE="$candidate"; break; fi
   done
   [ -n "$BUNDLE" ] && ok "verified MCP access (bundle: $BUNDLE)" \
                    || { info "no tool bundle this identity may use; skipping registration"; return; }
+
+  # An identity gets exactly one tool bundle: the platform resolves it from the agent id by
+  # substring with Array.find, and every caller takes the first element. The Claude Code slot is
+  # deliberately named "claude-code-lifecycle-operator-local-<date>" so that *something* holds
+  # lifecycle_operator -- without it, a stuck review has no actor permitted to give it a verdict.
+  # The cost is that the same identity is also the interactive client, and it cannot also hold
+  # front_door. So the planning tools are refused, and the only honest thing this installer can do
+  # is say which half the user got. Fixing it needs two identities, which is a platform change.
+  if [ "$BUNDLE" = lifecycle_operator ]; then
+    info "this identity holds the recovery bundle, so front_door is not available to it"
+    info "  refused: create_planning_ledger, shape_task_for_execution, wake_worker, front_door_briefing"
+    info "  cause: one identity resolves to one bundle, and this slot is the lifecycle-operator one"
+    info "  available: get_tasks, log_event, search, and the review/closure recovery tools"
+  fi
 
   if command -v claude >/dev/null 2>&1; then
     claude mcp remove datacore -s user >/dev/null 2>&1 || true
