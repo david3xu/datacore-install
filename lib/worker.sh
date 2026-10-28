@@ -127,6 +127,11 @@ mirror_generated_file() {
 # still names that example: an operator who has curated their own list keeps it.
 point_coordinator_at_generated_executors() {
   [ -f "$COORDINATOR_ENV" ] || return 0
+  # Repointing at a file with no profiles in it is worse than leaving the bundle example in
+  # place: the Coordinator loads zero executors and doctor fails executor_config:has_entries,
+  # on an install whose only fault is that no worker is enabled yet. Wait until there is at
+  # least one profile to point at; enabling a worker comes back through here.
+  grep -q '"executor_id"' "$EXECUTORS" 2>/dev/null || return 0
   _cur=$(grep '^DATACORE_EXECUTOR_CONFIG_PATH=' "$COORDINATOR_ENV" 2>/dev/null | head -1 | cut -d= -f2-)
   case "$_cur" in
     "$EXECUTORS_IN_CONTAINER") return 0 ;;                      # already ours

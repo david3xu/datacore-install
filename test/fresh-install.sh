@@ -67,7 +67,32 @@ check "no worker CLI survived the wipe" \
 
 # ------------------------------------------------------- 2. put the installer there
 phase "2. Deliver the installer the way a user gets it"
-if [ "$SOURCE" = published ]; then
+if [ "$SOURCE" = stage ]; then
+    # Install from a locally built release stage. The installer reads DATACORE_RELEASE_BASE, so
+    # this exercises the real download-and-verify path without pulling ~250MB over the network on
+    # every run -- and it tests the bundle actually about to be shipped, not the last published one.
+    STAGE="${DATACORE_STAGE:-$HOME/Developer/datacore-le-product-ready/dist/release-stage}"
+    [ -d "$STAGE/latest/download" ] || { echo "no release stage at $STAGE"; exit 2; }
+    # The stage holds a snapshot of the helper scripts, so a stage built before the last edit
+    # silently tests old code -- which is exactly how a fix can look like it did not work.
+    # Refresh them from the working tree every run.
+    for h in worker.sh provider.sh uninstall.sh; do
+        [ -f "$REPO/lib/$h" ] && cp "$REPO/lib/$h" "$STAGE/latest/download/$h"
+    done
+    [ -f "$REPO/datacore" ] && cp "$REPO/datacore" "$STAGE/latest/download/datacore"
+    (cd "$STAGE/latest/download" && shasum -a 256 \
+        datacore-local-edition-amd64.tar.gz datacore-local-edition-arm64.tar.gz \
+        datacore provider.sh uninstall.sh worker.sh uninstall-desktop-entry.py > SHA256SUMS)
+    vm "rm -rf ~/stage && mkdir -p ~/stage/latest/download" >/dev/null 2>&1
+    for f in "$STAGE"/latest/download/*; do
+        base=$(basename "$f")
+        case "$base" in *arm64*) continue ;; esac   # the VM is x86_64
+        colima ssh --profile "$VM_PROFILE" -- sh -c "cat > ~/stage/latest/download/$base" < "$f"
+    done
+    colima ssh --profile "$VM_PROFILE" -- sh -c "cat > ~/install.sh" < "$REPO/install.sh"
+    check "staged the local bundle into the VM" \
+          'test -s ~/stage/latest/download/datacore-local-edition-amd64.tar.gz && echo present' "present"
+elif [ "$SOURCE" = published ]; then
     vm "curl -fsSL '$RELEASE_URL' -o ~/install.sh" >/dev/null 2>&1
     check "downloaded install.sh from the published release" \
           'test -s ~/install.sh && echo present' "present"
@@ -84,10 +109,20 @@ fi
 
 # ------------------------------------------------------------------- 3. install
 phase "3. Install"
-vm "cd ~ && DATACORE_VERSION=$DATACORE_VERSION DATACORE_ACCEPT_EULA=1 sh ~/install.sh 2>&1 | tail -32"
+if [ "$SOURCE" = stage ]; then
+    vm "cd ~ && DATACORE_VERSION=latest DATACORE_RELEASE_BASE=file://\$HOME/stage DATACORE_ACCEPT_EULA=1 sh ~/install.sh 2>&1 | tail -32"
+else
+    vm "cd ~ && DATACORE_VERSION=$DATACORE_VERSION DATACORE_ACCEPT_EULA=1 sh ~/install.sh 2>&1 | tail -32"
+fi
 check "runtime answers on its health endpoint" \
       'curl -fsS -m 10 http://127.0.0.1:43123/health || echo UNREACHABLE' \
       '"status"'
+if ! vm_quiet 'test -x ~/.datacore/bin/datacore && echo yes' | grep -q yes; then
+    fail "the install did not complete — skipping the checks that depend on it"
+    printf '\n══════════════════════════════════════════\nRESULT: %s check(s) failed (install aborted)\n' "$FAILURES"
+    exit "$FAILURES"
+fi
+
 check "doctor reports no blocking failures" \
       '~/.datacore/bin/datacore doctor 2>&1 | tail -1' \
       '0 fail'
@@ -139,8 +174,11 @@ print(\"  profiles projected   :\", len(caps))
 print(\"  example-derived      :\", \"yes\" if \"example\" in src else \"no\")
 "'
 check "the Coordinator reads generated profiles, not the bundle example" \
-      'sudo cat ~/.datacore/data/coordinator/executor-capability-projection.json 2>/dev/null |
-       grep -o "executors[.a-z-]*example[.a-z-]*json" | head -1 || echo generated' \
+      'src=$(sudo cat ~/.datacore/data/coordinator/executor-capability-projection.json 2>/dev/null |
+             tr "," "\n" | sed -n "s/.*executor_config_path[^:]*:[^\"]*\"\\([^\"]*\\)\".*/\\1/p" | head -1)
+       if [ -z "$src" ]; then echo "no projection"
+       elif echo "$src" | grep -q example; then echo "example: $src"
+       else echo generated; fi' \
       "generated"
 check "every enabled worker has a matching executor profile" \
       'sudo python3 -c "
