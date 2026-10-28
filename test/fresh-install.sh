@@ -53,7 +53,9 @@ printf '  Started    : %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
 # ---------------------------------------------------------------- 1. clean slate
 phase "1. Wipe the machine"
-vm 'sudo rm -rf ~/.datacore ~/.datacore-local ~/dcsrc ~/install.sh >/dev/null 2>&1
+# ~/decoy and the uninstall log/status belong to phase 7. Left in place, a status file from an
+# earlier run would satisfy phase 7's check even if this run's uninstall never wrote one.
+vm 'sudo rm -rf ~/.datacore ~/.datacore-local ~/dcsrc ~/install.sh ~/decoy ~/uninstall.log ~/uninstall.status >/dev/null 2>&1
     rm -f ~/bin/claude ~/bin/codex ~/bin/agy ~/bin/muse >/dev/null 2>&1
     rm -f ~/.local/bin/claude ~/.local/bin/codex ~/.local/bin/agy ~/.local/bin/muse >/dev/null 2>&1
     docker rm -f $(docker ps -aq) >/dev/null 2>&1
@@ -207,8 +209,23 @@ print(\"UNREACHABLE: \" + \", \".join(missing) if missing else \"all enabled wor
       "all enabled workers reachable"
 
 # ------------------------------------------------------------------ 7. teardown
-phase "7. Uninstall leaves nothing behind"
-vm 'cd ~ && ~/.datacore/bin/datacore uninstall 2>&1 | tail -6'
+phase "7. Uninstall leaves nothing behind, and refuses an unsafe --purge-data"
+# Use the refusal variant as the uninstall. --purge-data is the one irreversible thing this tool
+# does, and nothing proved the guard in a real install -- only that a normal uninstall works,
+# which CI already covers. Pointing DATACORE_HOME at a directory that is plainly not ours proves
+# both halves at once: the deletion is refused, and the uninstall still completes.
+vm 'mkdir -p ~/decoy/Documents && printf keep > ~/decoy/Documents/file.txt'
+# Record the status of the one real invocation: the uninstall removes the command, so it cannot
+# be run a second time just to ask what it returned. A pipe would hide the status too.
+vm 'cd ~ && DATACORE_HOME=$HOME/decoy ~/.datacore/bin/datacore uninstall --purge-data --yes > ~/uninstall.log 2>&1; echo $? > ~/uninstall.status; tail -8 ~/uninstall.log'
+check "the decoy directory was not deleted" \
+      'test -f ~/decoy/Documents/file.txt && echo intact || echo DELETED' \
+      "intact"
+check "the refusal was reported, not silent" \
+      'grep -q "refusing to delete" ~/uninstall.log && echo reported || echo silent' \
+      "reported"
+check "refusing the purge exits non-zero" \
+      'cat ~/uninstall.status' "1"
 check "install tree is gone" \
       'test -d ~/.datacore/current && echo STILL_THERE || echo removed' \
       "removed"
