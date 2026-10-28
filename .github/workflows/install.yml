@@ -107,6 +107,42 @@ jobs:
           print(f'enabled {dispatch}, catalogue holds {len(cat)}')
           PY
 
+      # Enabled is not the same as reachable. The Coordinator dispatches from executor profiles,
+      # and when none are generated it falls back to the example list baked into the image --
+      # which silently works for the agent ids that list happens to name and fails for every
+      # other one. Assert the profiles exist and cover exactly the workers that are enabled.
+      - name: Every enabled worker has an executor profile
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import json, os, sys
+          home = os.path.expanduser('~/.datacore')
+          profiles_path = f'{home}/data/coordinator/executors.json'
+          if not os.path.exists(profiles_path):
+              sys.exit(f'no executor profiles at {profiles_path} — the Coordinator would fall back '
+                       'to the example list in the image and enabled workers would be unreachable')
+          profiles = json.load(open(profiles_path))
+          reg = json.load(open(f'{home}/current/generated/azure-worker-registry.json'))['workers']
+          enabled = sorted(w['agent_id'] for w in reg if w.get('phases'))
+          targets = sorted(p['target_agent'] for p in profiles)
+          assert enabled == targets, f'enabled={enabled} but profiles cover={targets}'
+          # A task naming no target still has to land somewhere, on each side.
+          impl = [p for p in profiles if p.get('is_default') and 'review' not in p['phases']]
+          rev  = [p for p in profiles if p.get('is_default') and p['phases'] == ['review']]
+          assert len(impl) == 1, f'expected one default implementation profile, got {impl}'
+          assert len(rev) == 1, f'expected one default review profile, got {rev}'
+          print(f'{len(profiles)} profile(s), covering exactly {targets}')
+          PY
+
+      - name: worker sync is idempotent
+        run: |
+          set -eu
+          before=$(sha256sum ~/.datacore/data/coordinator/executors.json | cut -d' ' -f1)
+          ~/.datacore/bin/datacore worker sync
+          after=$(sha256sum ~/.datacore/data/coordinator/executors.json | cut -d' ' -f1)
+          test "$before" = "$after" || { echo "sync rewrote an unchanged registry"; exit 1; }
+          echo "sync left the profiles byte-identical"
+
       - name: Enabling a worker whose CLI is missing says so
         run: |
           set -eu
@@ -178,11 +214,52 @@ jobs:
           # makes the AI client fail on every call with nothing to explain why.
           test ! -f ~/stub/entry.txt
 
+  consistency:
+    name: the pinned release is stated the same way everywhere
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # install.sh carries the release it was cut with, and the README tells users to fetch the
+      # installer from that same tag. Nothing but this check keeps the two in step, and a drift
+      # means the documented command installs a different version from the one it advertises.
+      - name: install.sh and README agree on the version
+        run: |
+          set -eu
+          pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          test -n "$pinned" || { echo "install.sh has no PINNED_RELEASE"; exit 1; }
+          echo "install.sh pins: $pinned"
+          bad=0
+          for url in $(grep -o 'datacore-install/[^/]*/install.sh' README.md | sort -u); do
+            ref=$(printf '%s' "$url" | cut -d/ -f2)
+            if [ "$ref" != "$pinned" ]; then
+              echo "README fetches the installer from '$ref', but install.sh pins '$pinned'"
+              bad=1
+            fi
+          done
+          [ "$bad" = 0 ] || exit 1
+          echo "README and install.sh both name $pinned"
+
+      # A pinned tag that was never published is worse than no pin: the documented one-liner 404s.
+      - name: the pinned release actually exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          if gh release view "$pinned" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "$pinned is published"
+          else
+            echo "::error::install.sh and README point at $pinned, which is not a published release — cut it before this lands on main"
+            exit 1
+          fi
+
   published:
     name: install from the published one-liner
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
       - name: Stub the claude CLI
         run: |
           mkdir -p ~/bin ~/stub
@@ -202,10 +279,18 @@ jobs:
           chmod +x ~/bin/claude
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
+      # Run the command the README actually prints, rather than a copy of it kept in this file.
+      # A copy drifts, and then CI proves an install path no user was ever told to take.
       - name: Install the way the README says to
         env:
           DATACORE_ACCEPT_EULA: '1'
-        run: curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh | sh
+        run: |
+          set -eu
+          cmd=$(grep -m1 '^curl -fsSL .*install.sh | sh$' README.md)
+          test -n "$cmd" || { echo "no one-liner found in README.md"; exit 1; }
+          echo "running the README's own command:"
+          echo "  $cmd"
+          sh -c "$cmd"
 
       - name: It runs, and it registered a client
         run: |
