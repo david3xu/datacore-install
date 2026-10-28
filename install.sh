@@ -1,7 +1,7 @@
 #!/bin/sh
 # Datacore installer.
 #
-# Usage:  curl -fsSL https://get.datacore.dev | sh
+# Usage:  curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh | sh
 #
 # Environment overrides:
 #   DATACORE_VERSION        version to install (default: latest)

@@ -38,7 +38,7 @@ run_lib_script() {
 
 run_bundle_script() {
   verb="$1"; script="$2"; shift 2
-  [ -d "$C" ] || die "Datacore is not installed. Run the installer: https://get.datacore.dev"
+  [ -d "$C" ] || die "Datacore is not installed. Run the installer: https://github.com/david3xu/datacore-install"
   if [ ! -f "$C/$script" ]; then
     # $C is the 'current' symlink; resolve it so the message names the real version.
     ver=$(basename "$(cd "$C" 2>/dev/null && pwd -P || printf '%s' "$C")")

@@ -8,13 +8,13 @@ This repository holds the installer and documentation. **It contains no Datacore
 ## Install
 
 ```bash
-curl -fsSL https://get.datacore.dev | sh
+curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh | sh
 ```
 
 Prefer to read before you run? That is the better habit:
 
 ```bash
-curl -fsSLO https://get.datacore.dev/install.sh
+curl -fsSLO https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh
 less install.sh
 sh install.sh
 ```
