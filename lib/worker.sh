@@ -191,6 +191,10 @@ restart_bridge_if_running() {
   _start="$ROOT/current/start-host-worker-bridge.sh"
   [ -x "$_stop" ] && [ -x "$_start" ] || return 0
   pgrep -f 'host-worker-bridge' >/dev/null 2>&1 || return 0
+  # Remember which bridge processes exist now. "A bridge is running" afterwards is not proof of a
+  # restart: a stale bridge the stop script failed to kill -- including one from an older version
+  # -- would satisfy it while the new one never came up with the change we just wrote.
+  _pids_before=$(pgrep -f 'host-worker-bridge' 2>/dev/null | tr '\n' ' ')
   if ! (cd "$ROOT/current" && "$_stop" >/dev/null 2>&1 && "$_start" >/dev/null 2>&1); then
     warn "could not restart the worker bridge — run: datacore restart"
     return 0
@@ -199,14 +203,19 @@ restart_bridge_if_running() {
   # table instead. A bridge that exits on a bad config would otherwise be reported as restarted.
   _waited=0
   while [ "$_waited" -lt 10 ]; do
-    if pgrep -f 'host-worker-bridge' >/dev/null 2>&1; then
-      ok "restarted the worker bridge so it picks up the change"
-      return 0
-    fi
+    for _pid in $(pgrep -f 'host-worker-bridge' 2>/dev/null); do
+      case " $_pids_before " in
+        *" $_pid "*) ;;                 # one of the old ones, still around
+        *) ok "restarted the worker bridge so it picks up the change"; return 0 ;;
+      esac
+    done
     sleep 1
     _waited=$((_waited + 1))
   done
-  warn "the worker bridge was told to start but is not running after 10s"
+  warn "the worker bridge did not come back after 10s"
+  if pgrep -f 'host-worker-bridge' >/dev/null 2>&1; then
+    warn "an older bridge process is still running and did not pick up the change"
+  fi
   warn "check it with: datacore doctor    then: datacore restart"
 }
 

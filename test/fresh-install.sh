@@ -61,6 +61,15 @@ vm 'sudo rm -rf ~/.datacore ~/.datacore-local ~/dcsrc ~/install.sh ~/decoy ~/uni
     docker rm -f $(docker ps -aq) >/dev/null 2>&1
     docker volume prune -f >/dev/null 2>&1
     true' >/dev/null 2>&1
+# The wipe removed files and containers but left processes running: a worker bridge from an
+# earlier run survived for hours across runs. A stale bridge makes the next run look better than
+# it is, because "a bridge is running" is how a successful restart is recognised.
+vm 'for p in $(pgrep -f host-worker-bridge 2>/dev/null); do sudo kill -9 "$p" >/dev/null 2>&1; done
+    for p in $(pgrep -f install-datacore-local 2>/dev/null); do sudo kill -9 "$p" >/dev/null 2>&1; done
+    true' >/dev/null 2>&1
+check "no Datacore process survived the wipe" \
+      'pgrep -f "host-worker-bridge|install-datacore-local" >/dev/null 2>&1 && echo STILL_RUNNING || echo none' \
+      "none"
 check "no install tree, no containers" \
       'echo "dirs=$(ls -d ~/.datacore* 2>/dev/null | wc -l) containers=$(docker ps -aq | wc -l)"' \
       "dirs=0 containers=0"
