@@ -716,3 +716,66 @@ jobs:
           [ "$(c '{"my-proj":"/repo"}')" = real ]                    || fail "a real mapping was treated as a stand-in"
           [ "$(c '{"default":"/other"}')" = real ]                   || fail "a project named default was discarded"
           echo "classification holds: a real mapping is never mistaken for a stand-in"
+
+      # The installer's own rewrite, run against .env fixtures. The block is extracted from
+      # install.sh between its markers, so this exercises the shipped code rather than a copy that
+      # can drift away from it.
+      - name: The installer rewrites the map without damaging it
+        run: |
+          set -eu
+          fail() { echo "::error::$1"; exit 1; }
+          T=$(mktemp -d); mkdir -p "$T/home"
+          python3 - <<'PY' > "$T/block.sh"
+          import pathlib, re
+          s = pathlib.Path("install.sh").read_text()
+          m = re.search(r'# >>> worker-project-map.*?\n(.*?)  # <<< worker-project-map\n', s, re.S)
+          assert m, "install.sh no longer carries the worker-project-map markers"
+          print("INSTALL_ROOT=${INSTALL_ROOT:?}")
+          print("die() { echo \"die: $*\" >&2; exit 9; }")
+          print("info() { printf 'info: %s\\n' \"$1\"; }")
+          print(m.group(1))
+          print('printf "MAPPED=%s\\n" "$PROJECTS_MAPPED"')
+          PY
+
+          run() { ( cd "$T/env" && INSTALL_ROOT="$T/root" HOME="$T/home" sh "$T/block.sh" ); }
+          val() { grep "^DATACORE_WORKER_PROJECT_WORKSPACES=" "$T/env/.env" | sed "s/^[^=]*=//; s/^'//; s/'\$//"; }
+          setup() { rm -rf "$T/env" "$T/root"; mkdir -p "$T/env"; printf '%s' "$1" > "$T/env/.env"; }
+
+          # --- a path with a space survives. Deleting it silently repointed a real mapping at a
+          #     directory that does not exist, which is the worst outcome of the three.
+          setup 'A=1
+          DATACORE_WORKER_PROJECT_WORKSPACES='"'"'{"p":"/Users/me/My Repo"}'"'"'
+          B=2'
+          out=$(run) || fail "the rewrite failed on a path containing a space"
+          printf '%s' "$(val)" | grep -q '"/Users/me/My Repo"' || { val; fail "a space inside the path was eaten"; }
+          printf '%s' "$out" | grep -q 'MAPPED=1' || fail "a real mapping was not reported as mapped"
+
+          # --- duplicate copies collapse to one, keeping the real mapping over the stand-ins
+          setup 'DATACORE_WORKER_PROJECT_WORKSPACES='"'"'{"_unconfigured":"/x"}'"'"'
+          KEEP=yes
+          DATACORE_WORKER_PROJECT_WORKSPACES='"'"'{"real":"/srv/repo"}'"'"''
+          out=$(run) || fail "the rewrite failed over duplicate copies"
+          [ "$(grep -c '^DATACORE_WORKER_PROJECT_WORKSPACES=' "$T/env/.env")" = 1 ] || fail "duplicates survived"
+          printf '%s' "$(val)" | grep -q '"real"' || { val; fail "the real mapping was not the one kept"; }
+          grep -q '^KEEP=yes$' "$T/env/.env" || fail "an unrelated line was lost"
+          printf '%s' "$out" | grep -q 'collapsed 2 copies' || fail "the collapse was not reported"
+
+          # --- the legacy stand-in is replaced, and never with $HOME
+          setup "DATACORE_WORKER_PROJECT_WORKSPACES='{\"default\":\"$T/home\"}'"
+          out=$(run) || fail "the rewrite failed over the legacy stand-in"
+          printf '%s' "$(val)" | grep -q '_unconfigured' || { val; fail "the legacy stand-in was kept"; }
+          printf '%s' "$(val)" | grep -q "\"$T/home\"" && fail "the rewrite still points a worker at \$HOME"
+          printf '%s' "$out" | grep -q 'MAPPED=0' || fail "a stand-in was reported as mapped"
+          test -d "$T/root/workspaces/_unconfigured" || fail "the stand-in directory was not created"
+
+          # --- a file with no copy of the key gets exactly one appended
+          setup 'ONLY=1'
+          run >/dev/null || fail "the rewrite failed on a file without the key"
+          [ "$(grep -c '^DATACORE_WORKER_PROJECT_WORKSPACES=' "$T/env/.env")" = 1 ] || fail "the key was not appended once"
+
+          # --- a double-quoted value is understood, not treated as a stand-in
+          setup 'DATACORE_WORKER_PROJECT_WORKSPACES="{\"q\":\"/srv/q\"}"'
+          out=$(run) || fail "the rewrite failed on a double-quoted value"
+          printf '%s' "$out" | grep -q 'MAPPED=1' || { val; fail "a double-quoted real mapping was discarded"; }
+
+          echo "installer rewrite holds: spaces kept, duplicates collapsed, \$HOME never written"

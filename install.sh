@@ -424,14 +424,26 @@ Full output: $_envlog"
   # The key is rewritten to appear exactly once. A value carried forward from an earlier install
   # left the live .env holding two copies, and which one applies then depends on whether the
   # reader takes the first or the last.
+  # >>> worker-project-map (the CI job extracts everything to the matching <<< marker and runs it
+  # against .env fixtures, so the test exercises the shipped code instead of a copy of it)
   # Keep this name in one place: `datacore project` recognises the same reserved key, and a
   # stand-in the two spell differently is one neither of them would clear.
   _ws_placeholder_key=_unconfigured
   _ws_placeholder_dir="$INSTALL_ROOT/workspaces/$_ws_placeholder_key"
   _ws_keep=''
   _ws_count=0
-  for _ws_val in $(grep '^DATACORE_WORKER_PROJECT_WORKSPACES=' .env 2>/dev/null | sed 's/^[^=]*=//' | tr -d " \t" || true); do
+  # Read the copies a line at a time. The first version of this fed a `for` loop from
+  # `... | tr -d " \t"`, to stop word splitting from breaking a value into pieces -- and that
+  # deleted the spaces inside the value too, so a user whose repository path contains a space
+  # ("/Users/me/My Repo") had their own mapping silently rewritten to a path that does not exist.
+  # A `while read` loop needs no such trick. It is fed by a here-document rather than a pipe so it
+  # runs in this shell: through a pipe, the two variables it sets would be lost with the subshell.
+  while IFS= read -r _ws_line; do
+    [ -n "$_ws_line" ] || continue
     _ws_count=$((_ws_count + 1))
+    _ws_val=${_ws_line#*=}
+    # Trim only the edges, never the inside.
+    _ws_val=$(printf '%s' "$_ws_val" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
     # Strip one layer of surrounding quotes, the three forms a .env value can take.
     case "$_ws_val" in
       \'*\') _ws_val=$(printf '%s' "$_ws_val" | sed "s/^'//; s/'\$//") ;;
@@ -444,7 +456,9 @@ Full output: $_envlog"
       *'"default":"'"$HOME"'"'*) ;;
       *) _ws_keep="$_ws_val" ;;
     esac
-  done
+  done <<WS_COPIES
+$(grep '^DATACORE_WORKER_PROJECT_WORKSPACES=' .env 2>/dev/null || true)
+WS_COPIES
 
   if [ -z "$_ws_keep" ]; then
     mkdir -p "$_ws_placeholder_dir"
@@ -474,8 +488,11 @@ Full output: $_envlog"
   else
     PROJECTS_MAPPED=1
     PROJECTS_SUMMARY="mapped (see: datacore project list)"
-    [ "$_ws_count" -gt 1 ] && info "collapsed $_ws_count copies of DATACORE_WORKER_PROJECT_WORKSPACES into one"
+    if [ "$_ws_count" -gt 1 ]; then
+      info "collapsed $_ws_count copies of DATACORE_WORKER_PROJECT_WORKSPACES into one"
+    fi
   fi
+  # <<< worker-project-map
 
   # Compose derives its project name from the directory, which is the 'current' symlink. Pinning it
   # stops a hand-run 'docker compose' here from forking a second stack. It does not rename the
