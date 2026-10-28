@@ -46,6 +46,7 @@ if [ -t 1 ]; then B=$(printf '\033[1m'); D=$(printf '\033[2m'); R=$(printf '\033
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '  %s✓%s %s\n' "$B" "$R" "$*"; }
 info() { printf '  %s·%s %s\n' "$D" "$R" "$*"; }
+warn() { printf '  %s!%s %s\n' "$B" "$R" "$*"; }
 die()  { printf '\n%sInstall stopped.%s %s\n\n' "$B" "$R" "$1" >&2; [ $# -gt 1 ] && printf '%s\n\n' "$2" >&2; exit 1; }
 step() { printf '\n%s%s%s\n' "$B" "$*" "$R"; }
 
@@ -181,6 +182,33 @@ sha256_of() {
 
 fetch() { curl -fsSL --retry 3 -o "$2" "$1"; }
 
+# Move the `current` pointer to a version directory and prove it resolves there.
+#
+# `mv` onto an existing symlink-to-a-directory follows the link and moves the source *inside* the
+# target directory, so a plain `mv -f current.new current` only ever worked on a first install;
+# on an upgrade it left `current` pointing at the old version with a stray `current.new` inside
+# it. `mv -h` is the BSD spelling of "do not follow the destination", `-T` the GNU one; unlinking
+# first is the portable last resort. Both the upgrade swap and the rollback go through here.
+point_current_at() {
+  _target=$1
+  ln -sfn "$_target" "$INSTALL_ROOT/current.new"
+  if ! mv -h "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current" 2>/dev/null \
+     && ! mv -T "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current" 2>/dev/null; then
+    if [ -e "$INSTALL_ROOT/current" ] && [ ! -L "$INSTALL_ROOT/current" ]; then
+      rm -f "$INSTALL_ROOT/current.new"
+      die "$INSTALL_ROOT/current is a real directory, not the version pointer." \
+          "Move it aside and run the installer again."
+    fi
+    rm -f "$INSTALL_ROOT/current"
+    mv "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
+  fi
+  _resolved=$(cd "$INSTALL_ROOT/current" 2>/dev/null && pwd -P || true)
+  [ "$_resolved" = "$(cd "$_target" && pwd -P)" ] \
+    || die "The 'current' pointer does not resolve to the installed version." \
+           "expected $_target
+     resolved $_resolved"
+}
+
 download_and_verify() {
   TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
   if [ "$VERSION" = latest ]; then rel="$RELEASE_BASE/latest/download"; else rel="$RELEASE_BASE/download/$VERSION"; fi
@@ -211,17 +239,16 @@ $(sed -n 's/^[0-9a-f]* \{1,2\}/       /p' "$TMP/SHA256SUMS")"
 
   mkdir -p "$INSTALL_ROOT/versions"
   tar -xzf "$TMP/$archive" -C "$INSTALL_ROOT/versions"
-  BUNDLE_DIR=$(find "$INSTALL_ROOT/versions" -maxdepth 1 -name 'datacore-local-edition-*' -type d | sort | tail -1)
-  [ -n "$BUNDLE_DIR" ] || die "The archive did not contain a bundle directory."
+  # Take the bundle directory from the archive itself. Scanning versions/ and keeping the
+  # lexically-last name picks the wrong install as soon as a second version is present — and
+  # 0.1.9 sorts after 0.1.10 — so an upgrade, or a deliberate DATACORE_VERSION downgrade, would
+  # configure and start a directory this run never unpacked.
+  _name=$(tar -tzf "$TMP/$archive" | sed -n 's|^\(datacore-local-edition-[^/]*\)/.*|\1|p' | head -1)
+  [ -n "$_name" ] || die "The archive did not contain a bundle directory."
+  BUNDLE_DIR="$INSTALL_ROOT/versions/$_name"
+  [ -d "$BUNDLE_DIR" ] || die "The archive did not unpack to $BUNDLE_DIR."
 
-  # Write the pointer atomically, then prove it resolves to the version we just unpacked.
-  ln -sfn "$BUNDLE_DIR" "$INSTALL_ROOT/current.new"
-  mv -f "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
-  resolved=$(cd "$INSTALL_ROOT/current" 2>/dev/null && pwd -P || true)
-  [ "$resolved" = "$(cd "$BUNDLE_DIR" && pwd -P)" ] \
-    || die "The 'current' pointer does not resolve to the installed version." \
-           "expected $BUNDLE_DIR
-     resolved $resolved"
+  point_current_at "$BUNDLE_DIR"
   # Same version re-installed, or no previous install: nothing to inherit.
   if [ "$PREVIOUS_DIR" = "$BUNDLE_DIR" ] || [ ! -f "$PREVIOUS_DIR/.env" ]; then PREVIOUS_DIR=''; fi
   if [ -n "$PREVIOUS_DIR" ]; then
@@ -233,16 +260,28 @@ $(sed -n 's/^[0-9a-f]* \{1,2\}/       /p' "$TMP/SHA256SUMS")"
 
 # ---------------------------------------------------------------- 4. licence
 
+# Record acceptance however it was given. Accepting through the environment used to leave no
+# record, so a later `datacore update` — which sets no variables and has no terminal to prompt on
+# — stopped with "cannot prompt for licence acceptance when piped".
+record_eula_acceptance() {
+  mkdir -p "$INSTALL_ROOT"
+  printf '%s accepted-via=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$INSTALL_ROOT/.eula-accepted"
+}
+
 accept_eula() {
-  [ "${DATACORE_ACCEPT_EULA:-0}" = 1 ] && { ok "licence accepted (DATACORE_ACCEPT_EULA)"; return; }
   [ -f "$INSTALL_ROOT/.eula-accepted" ] && { ok "licence already accepted"; return; }
+  if [ "${DATACORE_ACCEPT_EULA:-0}" = 1 ]; then
+    record_eula_acceptance environment
+    ok "licence accepted (DATACORE_ACCEPT_EULA)"
+    return
+  fi
   eula="$BUNDLE_DIR/EULA.md"
   [ -f "$eula" ] && say "" && cat "$eula"
   [ -t 0 ] || die "Cannot prompt for licence acceptance when piped." "Re-run with DATACORE_ACCEPT_EULA=1 once you have read $eula"
   printf '\nAccept these terms? [y/N] '
   read -r reply
   case "$reply" in y|Y|yes|YES) : ;; *) die "Licence not accepted." ;; esac
-  date -u +%Y-%m-%dT%H:%M:%SZ > "$INSTALL_ROOT/.eula-accepted"
+  record_eula_acceptance prompt
   ok "licence accepted"
 }
 
@@ -301,7 +340,7 @@ start_stack() {
     # An upgrade that cannot start must not leave `current` pointing at the new version: put the
     # pointer back so `datacore start` and the login agent keep using the install that worked.
     if [ -n "$PREVIOUS_DIR" ]; then
-      ln -sfn "$PREVIOUS_DIR" "$INSTALL_ROOT/current.new" && mv -f "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
+      point_current_at "$PREVIOUS_DIR"
       die "The upgrade failed; rolled back to $(basename "$PREVIOUS_DIR")." "$(tail -12 "$_log")
 
 Full output: $_log
@@ -407,39 +446,57 @@ register_clients() {
 # The front door is three files: the `datacore` dispatcher and the two lib scripts it execs for
 # `provider` and `worker`. Installing only the dispatcher leaves those verbs dead, so place all
 # three. Prefer siblings of this script (local run / dev); otherwise take them from the release.
-CLI_FILES="datacore lib/provider.sh lib/worker.sh lib/uninstall.sh"
+CLI_FILES="datacore lib/provider.sh lib/worker.sh lib/uninstall.sh lib/uninstall-desktop-entry.py"
 
 install_command() {
   mkdir -p "$BIN_DIR/lib"
   if [ "$VERSION" = latest ]; then _rel="$RELEASE_BASE/latest/download"
   else _rel="$RELEASE_BASE/download/$VERSION"; fi
 
+  # `datacore` itself has to be there; the lib/ helpers back one verb each. This script is served
+  # from main, so it can name a helper a release does not carry yet — losing `datacore uninstall`
+  # on such a release is worth reporting, not worth aborting an install whose stack is already up.
   _downloaded=0
+  _missing=''
   for _f in $CLI_FILES; do
+    case "$_f" in datacore) _required=1 ;; *) _required=0 ;; esac
     # Under `curl | sh` there is no script file: $0 is "sh", so dirname gives the user's CWD and a
     # stray file of the same name there would be installed. Only trust a sibling when $0 is a file.
     if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/$_f" ]; then
       cp "$SELF_DIR/$_f" "$BIN_DIR/$_f"
+      continue
+    fi
+    _name=$(basename "$_f")
+    _why=''
+    # An optional helper a release does not carry is reported by the line below, so keep curl's own
+    # "404" off the screen; a required file still shows curl's reason before the install stops.
+    if [ "$_required" = 1 ]; then _fetch_err=/dev/stderr; else _fetch_err=/dev/null; fi
+    if ! fetch "$_rel/$_name" "$BIN_DIR/$_f" 2>"$_fetch_err"; then
+      _why="this release does not carry $_name"
     else
-      _name=$(basename "$_f")
-      fetch "$_rel/$_name" "$BIN_DIR/$_f" \
-        || die "Could not download $_name from the release." \
-               "Check your network, or re-run the installer."
       # These land on the user's PATH, so hold them to the same standard as the archive.
       _want=$(grep " $_name\$" "$SUMS_FILE" 2>/dev/null | cut -d' ' -f1 || true)
-      [ -n "$_want" ] || { rm -f "$BIN_DIR/$_f"; die "SHA256SUMS does not list $_name." \
-        "This release is incomplete; nothing was added to your PATH."; }
       _got=$(sha256_of "$BIN_DIR/$_f")
-      [ "$_want" = "$_got" ] || { rm -f "$BIN_DIR/$_f"; die "Checksum mismatch on $_name — refusing to install." \
-        "expected $_want
-     actual $_got"; }
-      _downloaded=1
+      if [ -z "$_want" ]; then _why="SHA256SUMS does not list $_name"
+      elif [ "$_want" != "$_got" ]; then _why="checksum mismatch on $_name (expected $_want, actual $_got)"
+      fi
     fi
+    if [ -z "$_why" ]; then
+      _downloaded=1
+      continue
+    fi
+    rm -f "$BIN_DIR/$_f"
+    [ "$_required" = 0 ] || die "Could not install $_name: $_why." \
+        "Check your network, or re-run the installer."
+    _missing="${_missing:+$_missing, }$_name"
   done
   chmod +x "$BIN_DIR/datacore"
 
   if [ "$_downloaded" = 1 ]; then info "downloaded the datacore command from the release"; fi
   ok "installed the datacore command to $BIN_DIR"
+  if [ -n "$_missing" ]; then
+    warn "not installed: $_missing — the matching 'datacore' subcommand will say it is unavailable"
+  fi
   case ":$PATH:" in *":$BIN_DIR:"*) ;; *) info "add to PATH:  export PATH=\"$BIN_DIR:\$PATH\"" ;; esac
 }
 

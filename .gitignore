@@ -3,3 +3,4 @@
 SHA256SUMS
 dist/
 docs/STATUS.md
+.mcp.json

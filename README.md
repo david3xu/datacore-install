@@ -84,8 +84,8 @@ execution is opt-in and configured later, only if you want it.
 | `datacore stop` / `start` | stop and start the stack |
 | `datacore provider add <name>` | configure a model API key |
 | `datacore worker add <cli>` | register a local AI CLI as a worker |
-| `datacore update` | upgrade in place, with rollback |
-| `datacore uninstall` | remove everything, including client config entries |
+| `datacore update` | fetch the latest release and upgrade in place, rolling back on failure |
+| `datacore uninstall` | remove the containers, client entries, login agent and install |
 
 ## Giving Datacore model access
 
@@ -116,8 +116,17 @@ actually answer is reported as a failure, not saved as configuration.
 datacore uninstall
 ```
 
-Removes containers, volumes, login agents, the entries added to your AI clients' configuration,
-and — on explicit confirmation — your Datacore data directory.
+Removes the containers, the MCP entry this install added to your AI clients, the macOS login
+agent, and the install itself. **Your data is kept** — the path is printed so you can keep or
+remove it yourself.
+
+```bash
+datacore uninstall --purge-data     # also delete the data directory, after a y/N confirmation
+datacore uninstall --purge-images   # also delete the three Datacore images (~1.5GB)
+```
+
+Add `--yes` to skip the confirmation in a script. Only a client entry pointing at *this* install is
+removed, so a second install on another port keeps working.
 
 ## Support
 

@@ -13,6 +13,7 @@
 
 set -eu
 
+LIB_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || LIB_DIR=.
 ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
 C="$ROOT/current"
 LOGIN_AGENT_LABEL=com.datacore.local-edition
@@ -74,34 +75,47 @@ remove_containers() {
 
 # ---------------------------------------------------------------- 2. AI client registration
 
+# Only disconnect a registration that points at THIS install. A second install on another port
+# must keep working, and a user who removes a test install should not lose their real one.
 remove_client_entries() {
+  port=''
+  [ -n "$BUNDLE_DIR" ] && [ -f "$BUNDLE_DIR/.env" ] \
+    && port=$(grep '^DATACORE_HTTP_PORT=' "$BUNDLE_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2 || true)
+  [ -n "$port" ] || port=43123
+  url="http://127.0.0.1:$port/mcp"
   removed=''
+
   if command -v claude >/dev/null 2>&1; then
-    if claude mcp remove datacore -s user >/dev/null 2>&1; then removed='Claude Code'; fi
+    entry=$(claude mcp get datacore 2>/dev/null || true)
+    case "$entry" in
+      *"$url"*)
+        # The scope matters: an entry added per-project cannot be removed with -s user. `claude mcp
+        # get` prints the exact removal command, so take the scope from there rather than guessing.
+        scope=$(printf '%s\n' "$entry" | sed -n 's/.*claude mcp remove datacore -s \([a-z]*\).*/\1/p' | head -1)
+        [ -n "$scope" ] || scope=user
+        claude mcp remove datacore -s "$scope" >/dev/null 2>&1 && removed='Claude Code'
+        ;;
+      *) if [ -n "$entry" ]; then info "left the Claude Code entry alone; it points at another install"; fi ;;
+    esac
   fi
 
   cfg="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
   if [ -f "$cfg" ] && grep -q '"datacore"' "$cfg" 2>/dev/null; then
     if command -v python3 >/dev/null 2>&1; then
       cp "$cfg" "$cfg.datacore-uninstall-backup"
-      python3 - "$cfg" <<'PY' && removed="${removed:+$removed, }Claude Desktop"
-import json, sys
-path = sys.argv[1]
-with open(path) as fh:
-    config = json.load(fh)
-servers = config.get("mcpServers")
-if isinstance(servers, dict) and servers.pop("datacore", None) is not None:
-    with open(path, "w") as fh:
-        json.dump(config, fh, indent=2)
-        fh.write("\n")
-PY
+      if python3 "$LIB_DIR/uninstall-desktop-entry.py" "$cfg" "$port" >/dev/null 2>&1; then
+        removed="${removed:+$removed, }Claude Desktop"
+      else
+        rm -f "$cfg.datacore-uninstall-backup"
+        info "left the Claude Desktop entry alone; it does not point at this install"
+      fi
     else
       info "python3 not available; remove the \"datacore\" entry from $cfg yourself"
     fi
   fi
 
-  [ -n "$removed" ] && ok "removed the Datacore entry from $removed" \
-                    || info "no AI client entries to remove"
+  if [ -n "$removed" ]; then ok "removed the Datacore entry from $removed"
+  else info "no AI client entry for this install"; fi
 }
 
 # ---------------------------------------------------------------- 3. macOS login agent

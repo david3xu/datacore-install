@@ -34,7 +34,7 @@ fi
 
 # ---------------------------------------------------------------- helpers
 
-die() { printf '%s\n' "$1" >&2; exit 1; }
+die() { printf '%s\n' "$1" >&2; [ $# -gt 1 ] && printf '%s\n' "$2" >&2; exit 1; }
 
 not_yet() {
   printf 'datacore %s: not available yet. %s\n' "$1" "$2" >&2
@@ -42,10 +42,13 @@ not_yet() {
 }
 
 run_lib_script() {
-  # Locate the lib/ directory relative to this script, then exec the named file.
+  # Locate the lib/ directory relative to this script, then exec the named file. Capture the name
+  # before shifting it away, or the "not found" message reports the first argument instead.
+  _name=$1; shift
   _self=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || _self=""
-  _lib="${_self}/lib/$1"; shift
-  [ -f "$_lib" ] || die "lib/$1 not found alongside the datacore command. Re-run the installer."
+  _lib="${_self}/lib/$_name"
+  [ -f "$_lib" ] || die "lib/$_name is not installed alongside the datacore command." \
+    "The release this was installed from may not carry it yet. Re-run the installer to pick it up."
   exec sh "$_lib" "$@"
 }
 
