@@ -65,10 +65,12 @@ Lifecycle:
 Providers:
   provider    configure a model API key (add/list/remove)
 
+Workers:
+  worker      register a local AI CLI or API provider as a worker (add/list/remove)
+
 Not yet available:
   connect     register Datacore with an AI client (D4)
   enable      enable optional feature profiles, e.g. workers (D5)
-  worker      register a local AI CLI as a worker (D8)
 EOF
   exit 0
 }
@@ -94,7 +96,7 @@ case "$verb" in
   connect)  not_yet connect  "D4" ;;
   enable)   not_yet enable   "D5" ;;
   provider) run_lib_script provider.sh "$@" ;;
-  worker)   not_yet worker   "D8" ;;
+  worker)   run_lib_script worker.sh   "$@" ;;
 
   *) printf 'Unknown command: %s\n' "$verb" >&2; exit 2 ;;
 esac
