@@ -21,12 +21,27 @@ LOGIN_AGENT_LABEL=com.datacore.local-edition
 PURGE_DATA=0
 PURGE_IMAGES=0
 ASSUME_YES=0
+usage() {
+  cat <<'USAGE'
+Usage: datacore uninstall [options]
+
+Removes the containers, the MCP entry this install added to your AI clients, the macOS
+login agent, and the install itself. Your data directory is kept unless you ask for it.
+
+  --purge-data     also delete the data directory (asks first, unless --yes)
+  --purge-images   also delete the Datacore container images
+  --yes, -y        do not ask for confirmation
+  -h, --help       show this
+USAGE
+}
+
 for arg in "$@"; do
   case "$arg" in
     --purge-data)   PURGE_DATA=1 ;;
     --purge-images) PURGE_IMAGES=1 ;;
     --yes|-y)       ASSUME_YES=1 ;;
-    *) printf 'datacore uninstall: unknown option %s\n' "$arg" >&2; exit 2 ;;
+    -h|--help)      usage; exit 0 ;;
+    *) printf 'datacore uninstall: unknown option %s\n\n' "$arg" >&2; usage >&2; exit 2 ;;
   esac
 done
 
