@@ -33,7 +33,33 @@ INSTALL_ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
 # install silently adopted the first one's database. Set DATACORE_HOME explicitly to point a new
 # install at existing data on purpose.
 DATA_HOME="${DATACORE_HOME:-$INSTALL_ROOT/data}"
-COMPOSE_PROJECT="${DATACORE_COMPOSE_PROJECT:-datacore-local}"
+# The compose project is what names the containers, so two installs sharing one name share their
+# containers: the second install's `up` adopts, recreates and stops the first install's runtime.
+# Install root and data directory are already per-install; this was still a fixed constant, which
+# left the isolation incomplete in the one place that decides what Docker actually operates on.
+#
+# Derived from the install root, with two deliberate exceptions. An install at the default root
+# keeps the historical name, so upgrading the ordinary single install does not orphan the
+# containers it already has. And an install whose .env already names a project keeps that name,
+# for the same reason -- the value in .env is the one its running containers were created under.
+compose_project_for_root() {
+  if [ "$1" = "$HOME/.datacore" ]; then printf 'datacore-local'; return; fi
+  _h=$(printf '%s' "$1" | { shasum -a 256 2>/dev/null || sha256sum 2>/dev/null; } | cut -c1-8)
+  # Printed directly rather than through die(): this runs while the script is still setting up
+  # its variables, before the helpers below are defined.
+  if [ -n "$_h" ]; then printf 'datacore-local-%s' "$_h"
+  else
+    printf 'Neither shasum nor sha256sum is available, so a compose project name cannot be\n' >&2
+    printf 'derived for an install at %s. Set DATACORE_COMPOSE_PROJECT to a name of your own.\n' "$1" >&2
+    exit 1
+  fi
+}
+COMPOSE_PROJECT="${DATACORE_COMPOSE_PROJECT:-}"
+if [ -z "$COMPOSE_PROJECT" ] && [ -f "$INSTALL_ROOT/current/.env" ]; then
+  COMPOSE_PROJECT=$(grep '^COMPOSE_PROJECT_NAME=' "$INSTALL_ROOT/current/.env" 2>/dev/null \
+                    | head -1 | cut -d= -f2- || true)
+fi
+[ -n "$COMPOSE_PROJECT" ] || COMPOSE_PROJECT=$(compose_project_for_root "$INSTALL_ROOT")
 # The bundle's scripts resolve their compose project and workspace from this, so it has to be set
 # before any of them run, not only when .env is written.
 DATACORE_LOCAL_COMPOSE_PROJECT="$COMPOSE_PROJECT"; export DATACORE_LOCAL_COMPOSE_PROJECT

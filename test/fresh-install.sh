@@ -25,7 +25,10 @@ case "$VM_ARCH" in
 esac
 OTHER_ARCH=$( [ "$BUNDLE_ARCH" = amd64 ] && echo arm64 || echo amd64 )
 SOURCE="${SOURCE:-local}"
-REPO="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+# Overridable so the script can be run from a copy taken outside the repo. Editing this file
+# while sh is still reading it corrupts the running shell mid-token, so a long run is launched
+# from a snapshot -- which then has to be told where the repo is.
+REPO="${REPO:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}"
 RELEASE_URL="${RELEASE_URL:-https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh}"
 # Pin the bundle. install.sh defaults DATACORE_VERSION to "latest", so an unpinned proof
 # tests whatever happens to be published at the moment it runs -- which is not a proof.
