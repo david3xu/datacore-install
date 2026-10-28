@@ -19,6 +19,7 @@ C="$ROOT/current"
 LOGIN_AGENT_LABEL=com.datacore.local-edition
 
 PURGE_DATA=0
+PURGE_REFUSED=0
 PURGE_IMAGES=0
 ASSUME_YES=0
 usage() {
@@ -184,22 +185,29 @@ remove_images() {
 # Refuse to hand rm -rf anything that is not recognisably a Datacore data directory. The removal
 # below also runs as root inside a container with the parent directory mounted, so a wrong value
 # here is not a small mistake.
-assert_safe_to_delete() {
+# Returns 0 when $1 is recognisably a Datacore data directory. It reports and returns non-zero
+# rather than exiting: this runs before the install tree is removed, so aborting here would leave
+# the machine half-uninstalled -- containers and client entries already gone, the install still
+# present. Refusing the deletion and finishing the uninstall is the safer of the two.
+is_safe_to_delete() {
   _t=$1
   case "$_t" in
-    /|"$HOME"|"$HOME"/|/usr|/etc|/var|/opt|/home|/Users|"") 
-      die "Refusing to delete $_t: that is not a Datacore data directory." ;;
+    /|"$HOME"|"$HOME"/|/usr|/etc|/var|/opt|/home|/Users|"")
+      warn "refusing to delete $_t: that is not a Datacore data directory"
+      return 1 ;;
     /*) ;;
-    *)  die "Refusing to delete a relative path: $_t" ;;
+    *)  warn "refusing to delete a relative path: $_t"
+        return 1 ;;
   esac
   # A Datacore data directory carries the runtime's own state. Requiring one of these means a
   # misconfigured DATACORE_HOME pointing at, say, a documents folder is refused rather than erased.
   for _m in postgres runtime coordinator; do
     [ -e "$_t/$_m" ] && return 0
   done
-  die "Refusing to delete $_t: it does not look like a Datacore data directory." \
-      "Expected one of postgres/, runtime/ or coordinator/ inside it." \
-      "If you are certain, remove it yourself."
+  warn "refusing to delete $_t: it does not look like a Datacore data directory"
+  say  "  Expected one of postgres/, runtime/ or coordinator/ inside it."
+  say  "  If you are certain, remove it yourself."
+  return 1
 }
 
 remove_data() {
@@ -207,9 +215,11 @@ remove_data() {
   # fall back to the shared $HOME/.datacore-local, which another install may own.
   if [ "$DATA_HOME_KNOWN" != 1 ]; then
     if [ "$PURGE_DATA" = 1 ]; then
-      die "Cannot find this install's data directory, so --purge-data has nothing it can safely delete." \
-          "The install's .env is missing or unreadable. Pass DATACORE_HOME=<path> to say which" \
-          "directory to remove, after checking it is the right one."
+      PURGE_REFUSED=1
+      warn "cannot find this install's data directory, so --purge-data has nothing it can safely delete"
+      say  "  The install's .env is missing or unreadable. Pass DATACORE_HOME=<path> to say which"
+      say  "  directory to remove, after checking it is the right one."
+      return 0
     fi
     info "data directory unknown (this install's .env is missing); nothing removed"
     return 0
@@ -224,7 +234,11 @@ remove_data() {
   fi
   confirm "Permanently delete your Datacore data at $DATA_HOME ($size)? This cannot be undone." \
     || { info "data kept at $DATA_HOME"; return 0; }
-  assert_safe_to_delete "$DATA_HOME"
+  if ! is_safe_to_delete "$DATA_HOME"; then
+    PURGE_REFUSED=1
+    info "data kept at $DATA_HOME"
+    return 0
+  fi
   # Postgres writes as root inside its container, so parts of the tree are root-owned and a plain
   # rm fails. Do the removal from a container, which runs as root, before falling back to sudo.
   if ! rm -rf "$DATA_HOME" 2>/dev/null; then
@@ -265,3 +279,10 @@ say ""
 say "Datacore is uninstalled."
 [ -d "$DATA_HOME" ] && say "Your data is still at $DATA_HOME" || true
 say ""
+# The uninstall itself finished, but --purge-data did not do what was asked, so do not exit 0 and
+# let a script believe the data is gone.
+if [ "${PURGE_REFUSED:-0}" = 1 ]; then
+  say "--purge-data was requested but refused; your data was left in place (see above)."
+  say ""
+  exit 1
+fi

@@ -206,6 +206,19 @@ datacore uninstall --purge-images   # also delete the three Datacore images (~1.
 Add `--yes` to skip the confirmation in a script. Only a client entry pointing at *this* install is
 removed, so a second install on another port keeps working.
 
+Two deliberate refusals, because both directions of a wrong guess here are destructive:
+
+- If this install's `.env` is gone, the uninstaller does not know which data directory is its own
+  and will not guess at a shared default. It reports the data as unknown, and `--purge-data`
+  stops rather than deleting someone else's. Name it explicitly to proceed:
+  `DATACORE_HOME=/path datacore uninstall --purge-data`.
+- `--purge-data` refuses any path that does not look like a Datacore data directory, so a
+  mistyped `DATACORE_HOME` is rejected instead of erased.
+
+Your previous Claude Desktop configuration is copied to
+`claude_desktop_config.json.datacore-uninstall-backup` before the entry is removed, and kept. It
+holds your other MCP servers, so it is yours to delete once you have checked the result.
+
 ## Support
 
 Open an issue in this repository, and paste the output of `datacore doctor`. It prints one line

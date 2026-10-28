@@ -92,3 +92,20 @@ docker ps -q | wc -l                  # expect: 0
 ```
 
 Your data is kept deliberately. `--purge-data` removes it.
+
+`--purge-data` refuses a target that is not recognisably a Datacore data directory, so a mistyped
+path is rejected rather than erased. This is worth checking yourself before trusting the flag with
+real data. Run it in place of the uninstall above — it does uninstall, and it refuses only the
+deletion:
+
+```bash
+mkdir -p /tmp/not-datacore/Documents
+DATACORE_HOME=/tmp/not-datacore ~/.datacore/bin/datacore uninstall --purge-data --yes
+echo "exit: $?"                       # expect: 1 — the uninstall finished, the deletion did not
+ls -d /tmp/not-datacore               # expect: still there
+test -d ~/.datacore/current && echo "WRONG: tree survived" || echo "install still removed"
+```
+
+The refusal does not abort the uninstall: the containers, client entries and install tree are
+removed as usual, the data is left alone, and the non-zero exit tells a script that `--purge-data`
+did not do what it asked.
