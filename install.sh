@@ -124,9 +124,26 @@ docker_install_hint() {
   fi
 }
 
+# "macos/arm64" describes this machine. It does not describe where the containers go: on macOS
+# every container lives in a Linux VM, and colima can run several profiles at once, each with its
+# own Datacore and its own forwarded host ports. Name the one being installed into, so landing in
+# the wrong VM is visible on the first screen instead of surfacing later as an auth failure.
+container_host_desc() {
+  _chd_ctx=$(docker context show 2>/dev/null) || _chd_ctx=""
+  _chd_os=$(docker info --format '{{.OperatingSystem}}/{{.Architecture}}' 2>/dev/null) || _chd_os=""
+  if [ -n "$_chd_ctx" ] && [ -n "$_chd_os" ]; then printf "'%s' (%s)" "$_chd_ctx" "$_chd_os"
+  elif [ -n "$_chd_os" ]; then printf '%s' "$_chd_os"
+  else printf 'unknown'; fi
+}
+
+report_container_host() {
+  _rch=$(container_host_desc)
+  [ "$_rch" = unknown ] || ok "containers run in $_rch"
+}
+
 ensure_container_runtime() {
   command -v docker >/dev/null 2>&1 || die "No container runtime found." "$(docker_install_hint)"
-  if docker info >/dev/null 2>&1; then ok "container runtime is running"; return; fi
+  if docker info >/dev/null 2>&1; then ok "container runtime is running"; report_container_host; return; fi
 
   # A fresh Docker Engine install leaves the socket root-owned, so the daemon is running and the
   # user still cannot talk to it. Saying "install Docker" here sends people down the wrong path.
@@ -144,6 +161,7 @@ ensure_container_runtime() {
     colima start >/dev/null 2>&1 || die "colima failed to start." "Run 'colima start' yourself to see why."
     docker info >/dev/null 2>&1 || die "Docker is still unreachable after starting colima."
     ok "started colima"
+    report_container_host
     return
   fi
   die "Docker is installed but its daemon is not reachable." "$(docker_install_hint)"
@@ -451,8 +469,91 @@ Diagnose:    $BIN_DIR/datacore doctor"
     i=$((i + 1)); sleep 1
   done
   [ $i -lt 60 ] || die "Datacore started but never reported healthy." "Run: $BIN_DIR/datacore doctor"
-  ok "runtime healthy at $RUNTIME_URL"
+  ok "runtime answers at $RUNTIME_URL"
+  assert_runtime_is_ours "$port"
   gate_on_doctor
+}
+
+# Who else is listening on this port, in the words of whatever tool the machine has.
+port_owner() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN 2>/dev/null | sed -n '2,6p' | sed 's/^/    /'
+  elif command -v ss >/dev/null 2>&1; then
+    ss -ltnp 2>/dev/null | grep ":$1 " | sed -n '1,5p' | sed 's/^/    /'
+  fi
+}
+
+# A healthy /health proves a runtime is listening on the port. It does not prove it is THIS
+# install's runtime. On macOS a colima/lima profile forwards VM ports to the host, so a second
+# profile's Datacore -- or any earlier install still running -- answers just as happily on the
+# port this install picked. Every token minted a moment ago then comes back 401 from a database
+# that never saw it, and the only symptom is three token failures whose stated remediation
+# ("re-mint") cannot ever fix them. So ask the runtime who it thinks we are: the bearer token
+# this install wrote must resolve to the agent id this install wrote.
+assert_runtime_is_ours() {
+  _port="$1"
+  _aid=$(grep '^DATACORE_WORKER_BRIDGE_AGENT_ID=' .env | cut -d= -f2-)
+  _tok_present=$(grep -c '^DATACORE_RUNTIME_BEARER_TOKEN=.' .env || true)
+  if [ -z "$_aid" ] || [ "$_tok_present" = 0 ]; then
+    info "runtime identity not verified (no bridge identity in .env)"
+    return 0
+  fi
+
+  # The token goes through a curl config file, never argv: argv is readable by every process.
+  _cfg="${TMPDIR:-/tmp}/datacore-authcheck.$$"
+  ( umask 077
+    printf 'header = "Authorization: Bearer %s"\n' \
+      "$(grep '^DATACORE_RUNTIME_BEARER_TOKEN=' .env | cut -d= -f2-)" >"$_cfg" )
+  _code=$(curl -s -m 10 -o "$_cfg.body" -w '%{http_code}' -K "$_cfg" \
+            "$RUNTIME_URL/api/v1/auth/resolve" 2>/dev/null) || _code=000
+  _body=$(cat "$_cfg.body" 2>/dev/null || true)
+  rm -f "$_cfg" "$_cfg.body"
+
+  case "$_code" in
+    200)
+      # Read the id out of the body rather than matching a substring of it: the
+      # separator spacing in that JSON is not ours to depend on.
+      _got=$(printf '%s' "$_body" \
+        | sed -n 's/.*"authenticated_agent_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+      if [ "$_got" = "$_aid" ]; then
+        ok "runtime is this install's (resolved as $_aid)"
+        return 0
+      fi
+      die "The runtime on $RUNTIME_URL belongs to a different install." \
+"It accepted this install's token but calls the caller '${_got:-unknown}', not '$_aid'.
+
+$(runtime_port_diagnosis)" ;;
+    401|403)
+      die "The runtime on $RUNTIME_URL is not this install's runtime." \
+"It answers /health, but it rejects the token this install just minted (HTTP $_code).
+A different Datacore owns port $_port, so every identity written here will keep
+failing against it -- re-minting cannot fix that.
+
+$(runtime_port_diagnosis)" ;;
+    000)
+      die "The runtime on $RUNTIME_URL stopped answering." \
+"It passed the health check, then /api/v1/auth/resolve could not be reached.
+
+Diagnose: $BIN_DIR/datacore doctor" ;;
+    *)
+      die "The runtime on $RUNTIME_URL returned HTTP $_code for /api/v1/auth/resolve." \
+"$(printf '%s' "$_body" | head -c 200)
+
+Diagnose: $BIN_DIR/datacore doctor" ;;
+  esac
+}
+
+runtime_port_diagnosis() {
+  printf '  this install put its containers in : %s\n' "$(container_host_desc)"
+  _po=$(port_owner "$_port")
+  if [ -n "$_po" ]; then
+    printf '  what holds port %s on this host:\n%s\n' "$_port" "$_po"
+  fi
+  printf '\nFix it either way:\n'
+  printf '  - stop whatever else owns the port (another container runtime profile, an older\n'
+  printf '    Datacore), then: %s/datacore start\n' "$BIN_DIR"
+  printf '  - or give this install its own port: set DATACORE_HTTP_PORT in %s/.env,\n' "$PWD"
+  printf '    then: %s/datacore start\n' "$BIN_DIR"
 }
 
 # Checks that only describe an unconfigured optional worker CLI. Everything else is blocking.
@@ -526,13 +627,23 @@ Re-run:      $BIN_DIR/datacore doctor"
 # depends on the identity it authenticates as, which varies between installs, so never assume:
 # try the richest bundle first and register only what a real handshake accepts.
 mcp_bundle_works() {
-  curl -fsS -m 10 -X POST "$RUNTIME_URL/mcp" \
-    -H "Authorization: Bearer $1" \
-    -H "X-Datacore-MCP-Tool-Bundle: $2" \
-    -H 'Content-Type: application/json' \
-    -H 'Accept: application/json, text/event-stream' \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"datacore-install","version":"1"}}}' \
-    2>/dev/null | grep -q '"result"'
+  # The token goes in a curl config file, not on the command line: argv is readable by every
+  # process on the machine for as long as the call runs.
+  _mcfg="${TMPDIR:-/tmp}/datacore-mcpprobe.$$"
+  ( umask 077
+    printf 'header = "Authorization: Bearer %s"\nheader = "X-Datacore-MCP-Tool-Bundle: %s"\n' \
+      "$1" "$2" >"$_mcfg" )
+  if curl -fsS -m 10 -X POST "$RUNTIME_URL/mcp" -K "$_mcfg" \
+       -H 'Content-Type: application/json' \
+       -H 'Accept: application/json, text/event-stream' \
+       -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"datacore-install","version":"1"}}}' \
+       2>/dev/null | grep -q '"result"'; then
+    _mrc=0
+  else
+    _mrc=1
+  fi
+  rm -f "$_mcfg"
+  return $_mrc
 }
 
 register_clients() {
@@ -562,6 +673,7 @@ register_clients() {
 
   if command -v claude >/dev/null 2>&1; then
     claude mcp remove datacore -s user >/dev/null 2>&1 || true
+    # This one token does reach argv: `claude mcp add` accepts the header only as an argument.
     if claude mcp add --transport http --scope user datacore "$RUNTIME_URL/mcp" \
          --header "Authorization: Bearer $CLAUDE_CODE_TOKEN" \
          --header "X-Datacore-MCP-Tool-Bundle: $BUNDLE" >/dev/null 2>&1 &&
