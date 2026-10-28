@@ -118,15 +118,34 @@ function families(path) {
   const out = new Map();
   if (!path || !existsSync(path)) return out;
   const s = readFileSync(path, "utf8");
+  // The alias list for a family is a reference to a shared array, so collect those first. The file
+  // is minified, which makes the names meaningless but the shape stable: `X=["opus","sonnet",...]`,
+  // several per `var` statement.
+  const arrays = new Map();
+  for (const m of s.matchAll(/(\w+)=\[((?:"[^"]*",?)+)\]/g)) {
+    arrays.set(m[1], m[2].split(",").map((x) => x.replace(/^"|"$/g, "")).filter(Boolean));
+  }
   for (const m of s.matchAll(/agentFamily:"([^"]+)"/g)) {
     const seg = s.slice(m.index, m.index + 2000);
     const pick = (re) => (seg.match(re) || [])[1];
+    const aliasRef = pick(/modelAliases:(\w+)/);
     out.set(m[1], {
       cli: pick(/cli:"([^"]+)"/),
       defaultAlias: pick(/defaultModelAlias:"([^"]+)"/),
       inDefault: /inDefaultProfile:(?:!0|true)/.test(seg),
+      aliases: (aliasRef && arrays.get(aliasRef)) || [],
     });
   }
+  return out;
+}
+
+// Families the bundle knows about that this install has no token for. The registry generator writes
+// the default profile only, so these exist in the catalog but were never provisioned — enabling one
+// needs a token, which only the installer mints.
+function unprovisioned(fams, catalogue) {
+  const have = new Set(catalogue.filter((w) => w.token).map((w) => familyOf(w)));
+  const out = [];
+  for (const [fam, meta] of fams) if (!have.has(fam)) out.push([fam, meta]);
   return out;
 }
 
@@ -176,8 +195,17 @@ const fams = families(configPath);
 
 if (cmd === "list") {
   const enabled = summarise(registry.workers);
-  const avail = catalogue.workers.filter((w) => !isInfra(w)).length - enabled;
+  const avail = catalogue.workers.filter((w) => !isInfra(w) && w.token).length - enabled;
   console.log(`  ${enabled} enabled, ${avail} more available (datacore worker add <name>)`);
+  const missing = unprovisioned(fams, catalogue.workers);
+  if (missing.length) {
+    console.log(`  ${missing.length} family/families this install has no token for:`);
+    for (const [fam, meta] of missing) {
+      const aliases = meta.aliases.length ? `${meta.aliases.length} model(s)` : "no models listed";
+      console.log(`    ${fam}  (${meta.cli || "unknown cli"}, ${aliases})`);
+    }
+    console.log("  Provisioning those needs the installer — see: datacore worker add <name>");
+  }
   process.exit(0);
 }
 
@@ -218,8 +246,24 @@ if (cmd === "enable" || cmd === "disable") {
     process.exit(0);
   }
 
-  const pool = catalogue.workers.filter((w) => !isInfra(w) && matches(w));
+  const pool = catalogue.workers.filter((w) => !isInfra(w) && matches(w) && w.token);
   if (!pool.length) {
+    // Distinguish "the bundle has never heard of this" from "the bundle knows it but this install
+    // has no token for it". The second is the common case for a family outside the default profile,
+    // and it has a specific remedy, so saying "no worker matches" would be actively misleading.
+    const known = [...fams].filter(([fam, meta]) => fam === selName || meta.cli === selName);
+    if (known.length) {
+      const aliasNote = known
+        .map(([fam, meta]) => `${fam} (${meta.aliases.join(", ") || "no models listed"})`)
+        .join("\n    ");
+      die(
+        `'${sel}' is a worker Datacore knows, but this install has no token for it.\n` +
+          `  The registry is generated with the default profile only. To provision every\n` +
+          `  catalogued model, re-run the install with the full registry:\n\n` +
+          `    DATACORE_LOCAL_FULL_WORKER_REGISTRY=1 datacore update\n\n` +
+          `  Then: datacore worker add ${sel}\n\n  Matched:\n    ${aliasNote}`,
+      );
+    }
     const names = [...new Set(catalogue.workers.filter((w) => !isInfra(w)).map((w) => familyOf(w)))];
     die(`No worker matches '${sel}'.\n  Known: ${names.join(", ")}`);
   }

@@ -25,9 +25,19 @@ permissions:
 
 jobs:
   source:
-    name: install from this checkout
-    runs-on: ubuntu-24.04
+    # Both architectures, because the release ships an archive for each and the installer picks by
+    # platform. The arm64 archive had never been installed by anything before this job existed.
+    name: install from this checkout (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
