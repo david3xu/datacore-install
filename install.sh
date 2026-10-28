@@ -80,6 +80,10 @@ BUNDLE_DIR=""
 SUMS_FILE=""
 PREVIOUS_DIR=""
 WORKERS_SUMMARY="left as generated"
+# Declared here with the other install-wide state: the summary reads both, and under `set -u` an
+# install that somehow reached it without prepare_env would abort on the unset name instead.
+PROJECTS_MAPPED=0
+PROJECTS_SUMMARY="not configured"
 
 # ---------------------------------------------------------------- output helpers
 
@@ -406,11 +410,71 @@ Full output: $_envlog"
   # Coordinator quietly fell back to the example list baked into the image.
   mkdir -p "$DATA_HOME" "$DATA_HOME/coordinator" "$DATA_HOME/runtime"
 
-  # The bundle's preflight hard-fails without a worker project map, even though a minimal
-  # install never reads it. Supply a valid default so the user is never asked to write JSON.
-  if ! grep -q '^DATACORE_WORKER_PROJECT_WORKSPACES=.\+' .env 2>/dev/null; then
-    printf '\nDATACORE_WORKER_PROJECT_WORKSPACES=%s\n' "'{\"default\":\"$HOME\"}'" >> .env
-    info "set a placeholder worker project map (edit DATACORE_WORKER_PROJECT_WORKSPACES in .env)"
+  # The bundle's pre-flight rejects a worker project map that is missing, empty, or an empty
+  # object -- "the host-worker-bridge throws on empty" -- so an install has to leave something
+  # there even though it has no project to map yet. What it leaves matters:
+  #
+  # This used to be {"default":"$HOME"}. The bridge resolves a workspace by exact project name
+  # with no "default" key and no wildcard, so that entry matched no real project and every
+  # dispatch failed with "No worker workspace configured for project"; in the one case it did
+  # match, it handed a worker the user's entire home directory. A stand-in that cannot be
+  # mistaken for a working mapping, and cannot reach anything the user cares about, is better on
+  # both counts: an empty directory inside the install, under a reserved name.
+  #
+  # The key is rewritten to appear exactly once. A value carried forward from an earlier install
+  # left the live .env holding two copies, and which one applies then depends on whether the
+  # reader takes the first or the last.
+  # Keep this name in one place: `datacore project` recognises the same reserved key, and a
+  # stand-in the two spell differently is one neither of them would clear.
+  _ws_placeholder_key=_unconfigured
+  _ws_placeholder_dir="$INSTALL_ROOT/workspaces/$_ws_placeholder_key"
+  _ws_keep=''
+  _ws_count=0
+  for _ws_val in $(grep '^DATACORE_WORKER_PROJECT_WORKSPACES=' .env 2>/dev/null | sed 's/^[^=]*=//' | tr -d " \t" || true); do
+    _ws_count=$((_ws_count + 1))
+    # Strip one layer of surrounding quotes, the three forms a .env value can take.
+    case "$_ws_val" in
+      \'*\') _ws_val=$(printf '%s' "$_ws_val" | sed "s/^'//; s/'\$//") ;;
+      '"'*'"') _ws_val=$(printf '%s' "$_ws_val" | sed 's/^"//; s/"$//') ;;
+    esac
+    # Anything that is not a stand-in is the user's own mapping and is kept as it is.
+    case "$_ws_val" in
+      ''|'{}') ;;
+      *'"'"$_ws_placeholder_key"'"'*) ;;
+      *'"default":"'"$HOME"'"'*) ;;
+      *) _ws_keep="$_ws_val" ;;
+    esac
+  done
+
+  if [ -z "$_ws_keep" ]; then
+    mkdir -p "$_ws_placeholder_dir"
+    _ws_keep="{\"$_ws_placeholder_key\":\"$_ws_placeholder_dir\"}"
+    _ws_fresh=1
+  else
+    _ws_fresh=0
+  fi
+
+  # Rewrite in place: the first copy of the key becomes the canonical line, every later copy is
+  # dropped, and a file that never had the key gets it appended.
+  _ws_tmp=$(mktemp) || die "Could not create a temporary file."
+  WS_LINE="DATACORE_WORKER_PROJECT_WORKSPACES='$_ws_keep'" awk '
+    /^DATACORE_WORKER_PROJECT_WORKSPACES=/ {
+      if (!done) { print ENVIRON["WS_LINE"]; done = 1 }
+      next
+    }
+    { print }
+    END { if (!done) print ENVIRON["WS_LINE"] }
+  ' .env > "$_ws_tmp" && mv "$_ws_tmp" .env || { rm -f "$_ws_tmp"; die "Could not update .env"; }
+  chmod 600 .env 2>/dev/null || true
+
+  if [ "$_ws_fresh" = 1 ]; then
+    PROJECTS_MAPPED=0
+    PROJECTS_SUMMARY="none mapped — nothing can be dispatched yet"
+    info "no project mapped yet — map one with: datacore project link <project> <path-to-repo>"
+  else
+    PROJECTS_MAPPED=1
+    PROJECTS_SUMMARY="mapped (see: datacore project list)"
+    [ "$_ws_count" -gt 1 ] && info "collapsed $_ws_count copies of DATACORE_WORKER_PROJECT_WORKSPACES into one"
   fi
 
   # Compose derives its project name from the directory, which is the 'current' symlink. Pinning it
@@ -739,7 +803,7 @@ register_clients() {
 # The front door is three files: the `datacore` dispatcher and the two lib scripts it execs for
 # `provider` and `worker`. Installing only the dispatcher leaves those verbs dead, so place all
 # three. Prefer siblings of this script (local run / dev); otherwise take them from the release.
-CLI_FILES="datacore lib/provider.sh lib/worker.sh lib/uninstall.sh lib/uninstall-desktop-entry.py lib/install-desktop-entry.py"
+CLI_FILES="datacore lib/provider.sh lib/worker.sh lib/project.sh lib/uninstall.sh lib/uninstall-desktop-entry.py lib/install-desktop-entry.py"
 
 install_command() {
   mkdir -p "$BIN_DIR/lib"
@@ -883,6 +947,18 @@ main() {
   step "Finishing";                  install_login_agent
 
   ver=$(basename "$BUNDLE_DIR" | sed 's/^datacore-local-edition-//')
+
+  # A worker is dispatched into the repository its project is mapped to, and an unmapped project
+  # fails at that point no matter how healthy everything else is. So when nothing is mapped, that
+  # is the next step -- ahead of restarting the client, which cannot help until it is done.
+  if [ "${PROJECTS_MAPPED:-0}" = 0 ]; then
+    _next="datacore project link <project> <path-to-repo>    (until then, nothing is dispatched)"
+    _then="restart ${REGISTERED:-your AI client}, then ask it \"what tasks do I have?\""
+  else
+    _next="restart ${REGISTERED:-your AI client}, then ask it \"what tasks do I have?\""
+    _then="datacore project list    (check the repository each project maps to)"
+  fi
+
   cat <<EOF
 
 ${B}✓ Datacore $ver is running${R}
@@ -890,9 +966,11 @@ ${B}✓ Datacore $ver is running${R}
   Runtime    $RUNTIME_URL
   MCP        ${REGISTERED:-not registered}
   Workers    ${WORKERS_SUMMARY}
+  Projects   ${PROJECTS_SUMMARY}
   Gateway    off
 
-  Next: restart ${REGISTERED:-your AI client}, then ask it "what tasks do I have?"
+  Next:  $_next
+  Then:  $_then
   Later: datacore worker list    (see them), datacore worker add <name>    (enable more)
 
 EOF

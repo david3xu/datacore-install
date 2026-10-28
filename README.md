@@ -71,19 +71,43 @@ Nothing is hand-edited. You will not be asked to open a file in an editor.
 ## After installing
 
 ```
-✓ Datacore 0.1.77 is running
+✓ Datacore 0.1.79 is running
 
   Runtime    http://127.0.0.1:43123
   MCP        Claude Code
   Workers    2 enabled
+  Projects   none mapped — nothing can be dispatched yet
   Gateway    off
 
-  Next: restart Claude Code, then ask it "what tasks do I have?"
+  Next:  datacore project link <project> <path-to-repo>    (until then, nothing is dispatched)
+  Then:  restart Claude Code, then ask it "what tasks do I have?"
   Later: datacore worker list    (see them), datacore worker add <name>    (enable more)
 ```
 
 A minimal install is a complete product: memory, tasks and search inside your AI client. Model
 execution is opt-in and configured later, only if you want it.
+
+### Projects
+
+A worker is dispatched **into a git repository**, and which one is decided by the task's project
+name. Nothing is dispatched until that project is mapped:
+
+```bash
+datacore project list                                  # what is mapped, and whether it is usable
+datacore project link my-project ~/Developer/my-repo   # map a project to its repository
+datacore project unlink my-project                     # remove a mapping
+```
+
+The name has to be the project name as Datacore knows it — the one you see on a task or from
+`get_tasks` — and matching is **exact**. There is no `default` entry and no wildcard: an unmapped
+project fails with `No worker workspace configured for project: <name>`.
+
+A fresh install has nothing to map yet, so it reports `none mapped` and says so in its summary
+rather than looking ready. Earlier installs left `{"default":"<your home directory>"}` in the
+bundle `.env` to satisfy a pre-flight check that rejects an empty map. That entry matched no real
+project, so every dispatch failed — and had it matched, it would have handed a worker your whole
+home directory. `datacore project link` clears it, and `datacore project list` calls it out if it
+is still there.
 
 ### Workers
 
@@ -112,8 +136,8 @@ Three things gate dispatch besides the registry, and all three fail quietly:
 2. **That CLI has to be logged in.** Datacore only checks that the command exists — it cannot tell
    an authenticated CLI from one that will refuse on first use. Run the CLI once yourself and
    confirm it answers before expecting Datacore to dispatch to it.
-3. **`DATACORE_WORKER_PROJECT_WORKSPACES`** in the bundle `.env` has to map your project name to a
-   git repository.
+3. **The task's project has to be mapped to a repository.** `datacore project list` shows the
+   mapping and `datacore project link` sets it — see [Projects](#projects) below.
 
 A fourth used to fail quietly and no longer does: the Coordinator dispatches from executor
 profiles, which the installer now generates from your registry on every install. If they are ever
@@ -160,6 +184,8 @@ act on the right stack.
 | `datacore logs` | tail component logs |
 | `datacore stop` / `start` | stop and start the stack |
 | `datacore provider add <name>` | configure a model API key |
+| `datacore project list` | the repository each project's workers are dispatched into |
+| `datacore project link <project> <path>` | map a project to its repository |
 | `datacore worker list` | the workers the runtime will dispatch to |
 | `datacore worker add <name>` | enable a worker CLI, family, or one exact model |
 | `datacore update` | fetch the latest release and upgrade in place, rolling back on failure |

@@ -122,6 +122,7 @@ Providers:
 
 Workers:
   worker      register a local AI CLI or API provider as a worker (add/list/remove)
+  project     map a project to the repository its workers work in (link/list/unlink)
 
 Not yet available:
   connect     register Datacore with an AI client (the installer does this for you)
@@ -152,6 +153,7 @@ case "$verb" in
   enable)   not_yet enable  "Workers are turned on with: datacore worker add" ;;
   provider) run_lib_script provider.sh "$@" ;;
   worker)   run_lib_script worker.sh   "$@" ;;
+  project)  run_lib_script project.sh  "$@" ;;
 
   *) printf 'Unknown command: %s\n' "$verb" >&2; exit 2 ;;
 esac

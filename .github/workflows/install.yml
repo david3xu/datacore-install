@@ -596,3 +596,123 @@ jobs:
             || fail "the credential file stopped being created with mktemp"
 
           echo "all four outcomes hold: ours accepted, stranger refused, wrong identity refused, unknown reported as unknown"
+
+  project-map:
+    name: a project map that cannot silently stop dispatch
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      # `datacore project` exists because an install could pass doctor with 21 ok and still fail
+      # every dispatch: the bridge resolves a workspace by exact project name, the installer left
+      # {"default":"$HOME"} there to satisfy a pre-flight that rejects an empty map, and no command
+      # existed to put anything true in its place. These checks hold the parts of that contract a
+      # regression would be silent about.
+      - name: The project map keeps its contract
+        run: |
+          set -eu
+          T=$(mktemp -d)
+          R="$T/root"; mkdir -p "$R/current"
+          E="$R/current/.env"
+          KEY=DATACORE_WORKER_PROJECT_WORKSPACES
+          fail() { echo "::error::$1"; exit 1; }
+          dcp() { set +e; DATACORE_INSTALL_ROOT="$R" HOME="$T/home" sh lib/project.sh "$@" >"$T/out" 2>&1; _s=$?; set -e; printf '%s' "$_s"; }
+          mkdir -p "$T/home"
+          val() { grep "^$KEY=" "$E" | sed "s/^[^=]*=//; s/^'//; s/'\$//"; }
+
+          # A repository to map to, and one the user never created.
+          mkdir -p "$T/repo/.git"
+
+          # --- the reserved stand-in is not presented as a usable mapping -------------------
+          printf "A=1\n%s='{\"_unconfigured\":\"%s\"}'\nB=2\n" "$KEY" "$R/workspaces/_unconfigured" > "$E"
+          [ "$(dcp list)" = 0 ] || { cat "$T/out"; fail "list over a stand-in should exit 0"; }
+          grep -q "No project is mapped" "$T/out" || { cat "$T/out"; fail "a stand-in was reported as a mapping"; }
+
+          # --- the legacy {"default":"$HOME"} is called out, not inherited quietly ----------
+          printf "%s='{\"default\":\"%s\"}'\n" "$KEY" "$T/home" > "$E"
+          [ "$(dcp list)" = 0 ] || { cat "$T/out"; fail "list over the legacy stand-in should exit 0"; }
+          grep -q "No project is mapped" "$T/out" || fail "the legacy stand-in was counted as a mapping"
+          grep -q "whole home directory" "$T/out" || { cat "$T/out"; fail "the legacy stand-in was not called out"; }
+
+          # A project a user deliberately named "default" is theirs, and is NOT a stand-in.
+          printf "%s='{\"default\":\"%s\"}'\n" "$KEY" "$T/repo" > "$E"
+          [ "$(dcp list)" = 0 ] || fail "list should exit 0"
+          grep -q "No project is mapped" "$T/out" && fail "a real project named default was discarded"
+
+          # --- link collapses duplicate copies and clears every stand-in -------------------
+          printf "%s='{\"default\":\"%s\"}'\nX=1\n%s='{\"_unconfigured\":\"/tmp/x\"}'\n" "$KEY" "$T/home" "$KEY" > "$E"
+          [ "$(dcp link my-proj "$T/repo")" = 0 ] || { cat "$T/out"; fail "link should exit 0"; }
+          [ "$(grep -c "^$KEY=" "$E")" = 1 ] || fail "duplicate copies of the key survived the write"
+          printf '%s' "$(val)" | grep -q '"my-proj"' || { val; fail "the mapping was not written"; }
+          printf '%s' "$(val)" | grep -q '_unconfigured' && fail "the reserved stand-in survived a real mapping"
+          printf '%s' "$(val)" | grep -q '"default"' && fail "the legacy stand-in survived a real mapping"
+          grep -q "^X=1$" "$E" || fail "an unrelated .env line was lost"
+
+          # --- the path is stored absolute, because the bridge resolves it from its own cwd --
+          cd "$T/repo" && rel_status=$(DATACORE_INSTALL_ROOT="$R" HOME="$T/home" sh "$GITHUB_WORKSPACE/lib/project.sh" link rel-proj . >/dev/null 2>&1; echo $?) ; cd "$GITHUB_WORKSPACE"
+          [ "$rel_status" = 0 ] || fail "linking a relative path should resolve it, not fail"
+          printf '%s' "$(val)" | grep -q "\"$T/repo\"" || { val; fail "a relative path was not resolved to an absolute one"; }
+
+          # --- refusals -------------------------------------------------------------------
+          [ "$(dcp link nope "$T/does-not-exist")" = 1 ] || fail "linking a missing directory should fail"
+          # A name lands in the same single-quoted .env value as a path, so it breaks it the same
+          # way. Guarding only the path is the bug this case exists to catch.
+          [ "$(dcp link "quote'd" "$T/repo")" = 1 ] || fail "a project name with a single quote must be refused"
+          grep -q "single quote" "$T/out" || { cat "$T/out"; fail "the name refusal did not say why"; }
+          mkdir -p "$T/has'quote"
+          [ "$(dcp link q2 "$T/has'quote")" = 1 ] || fail "a path with a single quote must be refused, not written broken"
+          grep -q "single quote" "$T/out" || { cat "$T/out"; fail "the refusal did not say why"; }
+
+          # --- unlink reports once, and never leaves an empty map -------------------------
+          [ "$(dcp unlink no-such)" = 1 ] || fail "unlinking an unmapped project should fail"
+          [ "$(grep -c 'no-such' "$T/out")" = 1 ] || { cat "$T/out"; fail "the same refusal was printed twice"; }
+
+          printf "%s='{\"only\":\"%s\"}'\n" "$KEY" "$T/repo" > "$E"
+          [ "$(dcp unlink only)" = 0 ] || { cat "$T/out"; fail "unlinking the last project should exit 0"; }
+          printf '%s' "$(val)" | grep -q '_unconfigured' || { val; fail "the last unlink left a map the pre-flight rejects"; }
+          [ "$(printf '%s' "$(val)" | tr -d ' ')" != '{}' ] || fail "the map was left empty"
+
+          # --- a malformed value is reported, not silently replaced -----------------------
+          printf "%s='{not json'\n" "$KEY" > "$E"
+          [ "$(dcp list)" = 1 ] || fail "list over malformed JSON should fail"
+          grep -q "not valid JSON" "$T/out" || { cat "$T/out"; fail "a malformed map was not reported as such"; }
+
+          # --- the file stays private, and nothing is left in the temp directory ----------
+          printf "%s='{\"p\":\"%s\"}'\n" "$KEY" "$T/repo" > "$E"
+          [ "$(dcp link p2 "$T/repo")" = 0 ] || fail "link should exit 0"
+          [ "$(stat -c '%a' "$E")" = 600 ] || fail ".env is no longer private (got $(stat -c '%a' "$E"))"
+          [ -z "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'datacore-project*' 2>/dev/null)" ] || fail "a temp directory was left behind"
+          [ -z "$(find "$(dirname "$E")" -name '*.dc-project.tmp')" ] || fail "a temp .env was left behind"
+
+          echo "project map holds: stand-ins cleared, duplicates collapsed, never empty, paths absolute"
+
+      # The installer has to classify what it finds in .env without bun, and the arms that decide
+      # "this is a stand-in" vs "this is the user's own mapping" are the whole safety of the rewrite.
+      - name: The installer tells a stand-in from a real mapping
+        run: |
+          set -eu
+          fail() { echo "::error::$1"; exit 1; }
+          # Lifted verbatim from install.sh's prepare_env so the test cannot drift from the code.
+          grep -q "\*'\"'\"\$_ws_placeholder_key\"'\"'\*)" install.sh \
+            || fail "install.sh no longer carries the reserved-key arm this test mirrors"
+          cat > /tmp/classify.sh <<'EOF'
+          #!/bin/sh
+          _ws_placeholder_key=_unconfigured
+          case "$1" in
+            ''|'{}') echo standin-empty ;;
+            *'"'"$_ws_placeholder_key"'"'*) echo standin-reserved ;;
+            *'"default":"'"$HOME"'"'*) echo standin-legacy ;;
+            *) echo real ;;
+          esac
+          EOF
+          c() { HOME=/home/u sh /tmp/classify.sh "$1"; }
+          [ "$(c '')" = standin-empty ]                             || fail "empty value misread"
+          [ "$(c '{}')" = standin-empty ]                           || fail "empty object misread"
+          [ "$(c '{"_unconfigured":"/x"}')" = standin-reserved ]     || fail "reserved stand-in misread"
+          [ "$(c '{"default":"/home/u"}')" = standin-legacy ]        || fail "legacy stand-in misread"
+          [ "$(c '{"my-proj":"/repo"}')" = real ]                    || fail "a real mapping was treated as a stand-in"
+          [ "$(c '{"default":"/other"}')" = real ]                   || fail "a project named default was discarded"
+          echo "classification holds: a real mapping is never mistaken for a stand-in"

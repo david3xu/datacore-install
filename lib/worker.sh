@@ -725,8 +725,8 @@ cmd_list() {
   # rather than let the user discover an enabled worker that never picks anything up.
   say ""
   say "  Before anything is dispatched: the worker's CLI must resolve on PATH"
-  say "  (check: datacore doctor), and DATACORE_WORKER_PROJECT_WORKSPACES in"
-  say "  $ROOT/current/.env must map your project name to a git repository."
+  say "  (check: datacore doctor), and the task's project must be mapped to a repository"
+  say "  (check: datacore project list, map: datacore project link <project> <path>)."
 }
 
 # ---------------------------------------------------------------- subcommand: remove
