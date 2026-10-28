@@ -492,22 +492,39 @@ port_owner() {
 # this install wrote must resolve to the agent id this install wrote.
 assert_runtime_is_ours() {
   _port="$1"
-  _aid=$(grep '^DATACORE_WORKER_BRIDGE_AGENT_ID=' .env | cut -d= -f2-)
+  # First value wins. A key repeated by a hand edit or a merge would otherwise make these
+  # multi-line, and a two-line agent id can never equal the one the runtime resolves.
+  _aid=$(grep '^DATACORE_WORKER_BRIDGE_AGENT_ID=' .env | head -1 | cut -d= -f2-)
   _tok_present=$(grep -c '^DATACORE_RUNTIME_BEARER_TOKEN=.' .env || true)
-  if [ -z "$_aid" ] || [ "$_tok_present" = 0 ]; then
+  if [ -z "$_aid" ] && [ "$_tok_present" = 0 ]; then
     info "runtime identity not verified (no bridge identity in .env)"
     return 0
   fi
+  # Half an identity is not an install without one: it is a broken install, and skipping the
+  # check here is how a stranger's runtime would get reported as ours.
+  if [ -z "$_aid" ] || [ "$_tok_present" = 0 ]; then
+    die "This install's bridge identity is incomplete." \
+"$PWD/.env has $([ -z "$_aid" ] && echo 'a runtime token but no DATACORE_WORKER_BRIDGE_AGENT_ID' \
+                                 || echo 'a bridge agent id but no DATACORE_RUNTIME_BEARER_TOKEN').
+Without both, nothing can establish that the runtime on this port is this install's.
+
+Re-run the installer to regenerate the identities."
+  fi
 
   # The token goes through a curl config file, never argv: argv is readable by every process.
-  _cfg="${TMPDIR:-/tmp}/datacore-authcheck.$$"
-  ( umask 077
-    printf 'header = "Authorization: Bearer %s"\n' \
-      "$(grep '^DATACORE_RUNTIME_BEARER_TOKEN=' .env | cut -d= -f2-)" >"$_cfg" )
-  _code=$(curl -s -m 10 -o "$_cfg.body" -w '%{http_code}' -K "$_cfg" \
+  # mktemp, not a PID-named path: $$ is predictable, and > would follow a file or symlink
+  # another process planted there first. The trap matters because the curl below can wait ten
+  # seconds, and a Ctrl-C in that window would otherwise leave the token on disk.
+  _cfg=$(mktemp "${TMPDIR:-/tmp}/datacore-authcheck.XXXXXX")
+  _cfgbody=$(mktemp "${TMPDIR:-/tmp}/datacore-authcheck.XXXXXX")
+  trap 'rm -f "$_cfg" "$_cfgbody"' EXIT INT TERM
+  printf 'header = "Authorization: Bearer %s"\n' \
+    "$(grep '^DATACORE_RUNTIME_BEARER_TOKEN=' .env | head -1 | cut -d= -f2-)" >"$_cfg"
+  _code=$(curl -s -m 10 -o "$_cfgbody" -w '%{http_code}' -K "$_cfg" \
             "$RUNTIME_URL/api/v1/auth/resolve" 2>/dev/null) || _code=000
-  _body=$(cat "$_cfg.body" 2>/dev/null || true)
-  rm -f "$_cfg" "$_cfg.body"
+  _body=$(cat "$_cfgbody" 2>/dev/null || true)
+  rm -f "$_cfg" "$_cfgbody"
+  trap - EXIT INT TERM
 
   case "$_code" in
     200)
@@ -524,10 +541,15 @@ assert_runtime_is_ours() {
 
 $(runtime_port_diagnosis)" ;;
     401|403)
-      die "The runtime on $RUNTIME_URL is not this install's runtime." \
+      # Do not overclaim. A stranger's runtime and our own runtime holding a token minted for
+      # some other identity are indistinguishable from here; both answer /health and refuse
+      # this token. Name both, or the user frees a port that was already theirs.
+      die "The runtime on $RUNTIME_URL does not accept this install's identity." \
 "It answers /health, but it rejects the token this install just minted (HTTP $_code).
-A different Datacore owns port $_port, so every identity written here will keep
-failing against it -- re-minting cannot fix that.
+Two things look exactly like this from here:
+  - another Datacore owns port $_port, and this install is talking to it;
+  - this runtime is ours, but its database never saw this token -- the identities in
+    .env belong to a different install root or a wiped database.
 
 $(runtime_port_diagnosis)" ;;
     000)

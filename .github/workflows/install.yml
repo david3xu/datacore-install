@@ -464,7 +464,7 @@ jobs:
 
           # Drive the shipped functions, not a copy of them.
           cat > "$T/harness.sh" <<'EOS'
-          set -u
+          set -eu
           B=''; D=''; R=''
           ok()   { printf 'OK %s\n' "$*"; }
           info() { printf 'SKIP %s\n' "$*"; }
@@ -482,19 +482,37 @@ jobs:
           EOS
 
           env_for() { printf 'DATACORE_WORKER_BRIDGE_AGENT_ID=%s\nDATACORE_RUNTIME_BEARER_TOKEN=%s\nDATACORE_HTTP_PORT=44321\n' "$1" "$2" > "$T/.env"; }
-          run() { set +e; sh "$T/harness.sh" "$T" "$GITHUB_WORKSPACE/install.sh" >"$T/out" 2>&1; printf '%s' "$?"; set -e; }
+          run() { set +e; TMPDIR="$T" sh "$T/harness.sh" "$T" "$GITHUB_WORKSPACE/install.sh" >"$T/out" 2>&1; printf '%s' "$?"; set -e; }
 
           # Our own runtime: the token resolves to the agent id this install wrote.
           env_for stub-bridge dc_stub_deadbeef
           [ "$(run)" = 0 ] || fail "our own runtime was refused: $(cat "$T/out")"
           grep -q "resolved as stub-bridge" "$T/out" || fail "the accepted case did not say which identity resolved"
 
-          # A stranger's runtime on our port: it rejects the identity we just minted.
+          # A runtime that refuses our identity. The refusal must offer BOTH causes: a stranger
+          # on the port, and our own runtime whose database never saw this token. Claiming only
+          # the first sends the user to free a port that was already theirs.
           env_for stub-bridge dc_stub_not_minted_here
           [ "$(run)" = 1 ] || fail "a runtime that rejects our token was accepted"
-          grep -q "is not this install's runtime" "$T/out" || fail "the refusal did not name the cause"
+          grep -q "does not accept this install's identity" "$T/out" || fail "the refusal did not name the cause"
+          grep -q "another Datacore owns port" "$T/out" || fail "the refusal dropped the foreign-runtime cause"
+          grep -q "never saw this token" "$T/out" || fail "the refusal dropped the wrong-identity cause"
           grep -q "DATACORE_HTTP_PORT" "$T/out" || fail "the refusal did not offer the port fix"
-          grep -q "re-minting cannot fix" "$T/out" || fail "the refusal left re-minting on the table"
+
+          # A key repeated in .env must not become a two-line value that can never match.
+          printf 'DATACORE_WORKER_BRIDGE_AGENT_ID=stub-bridge\nDATACORE_WORKER_BRIDGE_AGENT_ID=stale-one\nDATACORE_RUNTIME_BEARER_TOKEN=dc_stub_deadbeef\nDATACORE_RUNTIME_BEARER_TOKEN=dc_stub_stale\nDATACORE_HTTP_PORT=44321\n' > "$T/.env"
+          [ "$(run)" = 0 ] || fail "a duplicated .env key broke the identity check: $(cat "$T/out")"
+
+          # Half an identity is a broken install, not an install without one. Skipping the check
+          # here is how a stranger's runtime gets reported as ours.
+          printf 'DATACORE_RUNTIME_BEARER_TOKEN=dc_stub_deadbeef\nDATACORE_HTTP_PORT=44321\n' > "$T/.env"
+          [ "$(run)" = 1 ] || fail "a token with no agent id was treated as nothing to check"
+          grep -q "identity is incomplete" "$T/out" || fail "an incomplete identity was not named"
+          printf 'DATACORE_WORKER_BRIDGE_AGENT_ID=stub-bridge\nDATACORE_HTTP_PORT=44321\n' > "$T/.env"
+          [ "$(run)" = 1 ] || fail "an agent id with no token was treated as nothing to check"
+
+          # No credential may survive the call, on any path.
+          [ -z "$(find "$T" -name 'datacore-authcheck.*')" ] || fail "a token file was left behind"
 
           # A runtime that trusts the token but is serving some other install's identity.
           env_for someone-else dc_stub_deadbeef
@@ -515,5 +533,7 @@ jobs:
           [ "$(grep -c -- '--header "Authorization: Bearer' install.sh)" = 1 ] \
             || fail "the number of tokens passed in argv changed; argv is world-readable"
           grep -q 'curl .*-K "\$_cfg"' install.sh || fail "the auth probe stopped using a curl config file"
+          grep -q 'mktemp "\${TMPDIR:-/tmp}/datacore-authcheck' install.sh \
+            || fail "the credential file stopped being created with mktemp"
 
           echo "all four outcomes hold: ours accepted, stranger refused, wrong identity refused, unknown reported as unknown"
