@@ -265,8 +265,12 @@ start_stack() {
 
   # Keep the output: "run doctor.sh" is useless advice when the reason is already on screen, and
   # doctor cannot explain a failure that happened while loading images.
+  # Worker families are opt-in (`datacore worker add`), but the bundle's own doctor gate fails the
+  # install when the claude or codex CLI is merely absent — true of most machines, and of every
+  # machine that only wants memory, tasks and search. Skip that gate and apply our own below, so a
+  # real inconsistency still stops the install.
   _log="${TMPDIR:-/tmp}/datacore-start.$$.log"
-  if ! "$_cmd" >"$_log" 2>&1; then
+  if ! DATACORE_LOCAL_EDITION_SKIP_DOCTOR_GATE=1 "$_cmd" >"$_log" 2>&1; then
     die "Datacore failed to start." "$(tail -12 "$_log")
 
 Full output: $_log
@@ -283,6 +287,31 @@ Diagnose:    $BUNDLE_DIR/doctor.sh"
   done
   [ $i -lt 60 ] || die "Datacore started but never reported healthy." "Run: $BUNDLE_DIR/doctor.sh"
   ok "runtime healthy at $RUNTIME_URL"
+  gate_on_doctor
+}
+
+# Checks that only describe an unconfigured optional worker CLI. Everything else is blocking.
+WORKER_LAUNCHER_CHECK='^bridge_dispatch:launcher:'
+
+gate_on_doctor() {
+  _dlog="${TMPDIR:-/tmp}/datacore-doctor.$$.log"
+  "$BUNDLE_DIR/doctor.sh" >"$_dlog" 2>&1 || true
+  _fails=$(grep ' FAIL ' "$_dlog" | sed 's/.* FAIL //' | awk '{print $1}' || true)
+  _blocking=$(printf '%s\n' "$_fails" | grep -v "$WORKER_LAUNCHER_CHECK" | grep -v '^$' || true)
+  _workers=$(printf '%s\n' "$_fails" | grep "$WORKER_LAUNCHER_CHECK" | grep -c . || true)
+
+  if [ -n "$_blocking" ]; then
+    die "Datacore started, but doctor reports a problem." "$_blocking
+
+Full report: $_dlog
+Re-run:      $BUNDLE_DIR/doctor.sh"
+  fi
+  rm -f "$_dlog"
+  if [ "${_workers:-0}" -gt 0 ]; then
+    ok "doctor: no blocking failures ($_workers optional worker CLI not installed)"
+  else
+    ok "doctor: no blocking failures"
+  fi
 }
 
 # ---------------------------------------------------------------- 6. register AI clients

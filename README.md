@@ -25,7 +25,9 @@ sh install.sh
 installed but stopped, the installer starts it for you. If you have no container runtime at all,
 the installer prints the one command to install one and stops.
 
-You do **not** need Node, Bun, Python, or any AI CLI installed to get started.
+You do **not** need Node, Bun, Python, or any AI CLI installed to get started. Datacore's own
+scripts run on bun; if your machine has none, the installer puts a private copy in
+`~/.datacore/bin` and changes nothing system-wide.
 
 ## What the installer does
 
