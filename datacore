@@ -29,6 +29,14 @@ C="$ROOT/current"
 # install in a non-default location would target the default location instead.
 DATACORE_INSTALL_ROOT="$ROOT"; export DATACORE_INSTALL_ROOT
 
+# The bundle's scripts resolve their compose project from DATACORE_LOCAL_COMPOSE_PROJECT and default
+# it to "datacore-local". An install created with a different project name would otherwise have its
+# containers started under one name and stopped, inspected and upgraded under another.
+if [ -z "${DATACORE_LOCAL_COMPOSE_PROJECT:-}" ] && [ -f "$C/.env" ]; then
+  _proj=$(grep '^COMPOSE_PROJECT_NAME=' "$C/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
+  if [ -n "$_proj" ]; then DATACORE_LOCAL_COMPOSE_PROJECT="$_proj"; export DATACORE_LOCAL_COMPOSE_PROJECT; fi
+fi
+
 # `datacore update` re-runs the installer, which is what knows how to fetch the latest release and
 # hand the previous install to the new bundle's upgrade step. Overridable for a private mirror.
 INSTALLER_URL="${DATACORE_INSTALLER_URL:-https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh}"
@@ -64,6 +72,14 @@ run_installer() {
   command -v curl >/dev/null 2>&1 || die "curl is needed to fetch the installer."
   [ $# -eq 0 ] || die "datacore update takes no arguments."
   DATACORE_INSTALL_ROOT="$ROOT"; export DATACORE_INSTALL_ROOT
+
+# The bundle's scripts resolve their compose project from DATACORE_LOCAL_COMPOSE_PROJECT and default
+# it to "datacore-local". An install created with a different project name would otherwise have its
+# containers started under one name and stopped, inspected and upgraded under another.
+if [ -z "${DATACORE_LOCAL_COMPOSE_PROJECT:-}" ] && [ -f "$C/.env" ]; then
+  _proj=$(grep '^COMPOSE_PROJECT_NAME=' "$C/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)
+  if [ -n "$_proj" ]; then DATACORE_LOCAL_COMPOSE_PROJECT="$_proj"; export DATACORE_LOCAL_COMPOSE_PROJECT; fi
+fi
   printf 'Fetching the installer from %s\n\n' "$INSTALLER_URL"
   _tmp=$(mktemp) || die "Could not create a temporary file."
   curl -fsSL --retry 3 -o "$_tmp" "$INSTALLER_URL" || { rm -f "$_tmp"; die "Could not download the installer from $INSTALLER_URL"; }

@@ -115,6 +115,23 @@ datacore stop / datacore start    # control it by hand at any time
 `datacore uninstall` removes the agent. On Linux no agent is installed; run `datacore start`
 yourself, or add it to your own session startup.
 
+### A second install on the same machine
+
+Two installs must not share a Compose project, or the second one reconciles the first one's running
+containers to its own configuration. Give each its own install root, data directory, project name
+and port:
+
+```bash
+DATACORE_INSTALL_ROOT="$HOME/.datacore-staging" \
+DATACORE_HOME="$HOME/.datacore-staging/data" \
+DATACORE_COMPOSE_PROJECT=datacore-staging \
+  sh install.sh
+```
+
+Each install's generated secrets live under its own data directory, and `datacore` reads the
+project name back from the install it was run from, so `stop`, `start`, `doctor` and `update` all
+act on the right stack.
+
 ## Commands
 
 | | |

@@ -9,9 +9,9 @@
 #   DATACORE_INSTALL_ROOT   where versions are kept (default: ~/.datacore)
 #   DATACORE_HOME           runtime data directory (default: ~/.datacore-local)
 #   DATACORE_ACCEPT_EULA=1  skip the interactive licence prompt (CI)
-#   DATACORE_COMPOSE_PROJECT         COMPOSE_PROJECT_NAME written to .env (default: datacore-local).
-#                                    The bundle hard-codes its own project name, so this does not
-#                                    rename the stack; two stacks need two Docker daemons.
+#   DATACORE_COMPOSE_PROJECT         Compose project for this install (default: datacore-local).
+#                                    Give a second install on the same machine its own, or it
+#                                    reconciles the first install's containers to its own config.
 #   DATACORE_SKIP_CLIENT_REGISTRATION=1  do not touch AI client config (proof runs)
 #   DATACORE_SKIP_START=1   install and configure, but start no containers (proof runs)
 #
@@ -27,6 +27,9 @@ INSTALL_ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
 # install at existing data on purpose.
 DATA_HOME="${DATACORE_HOME:-$INSTALL_ROOT/data}"
 COMPOSE_PROJECT="${DATACORE_COMPOSE_PROJECT:-datacore-local}"
+# The bundle's scripts resolve their compose project and workspace from this, so it has to be set
+# before any of them run, not only when .env is written.
+DATACORE_LOCAL_COMPOSE_PROJECT="$COMPOSE_PROJECT"; export DATACORE_LOCAL_COMPOSE_PROJECT
 BIN_DIR="$INSTALL_ROOT/bin"
 
 # The bundle's own scripts run on bun, so a machine with only Docker cannot start Datacore.
@@ -347,6 +350,12 @@ Full output: $_envlog"
   # stops a hand-run 'docker compose' here from forking a second stack. It does not rename the
   # bundle's own stack, which uses a fixed project name of its own.
   grep -q '^COMPOSE_PROJECT_NAME=' .env || printf 'COMPOSE_PROJECT_NAME=%s\n' "$COMPOSE_PROJECT" >> .env
+  # COMPOSE_PROJECT_NAME in .env only governs a hand-run `docker compose` in the bundle directory.
+  # The bundle's own scripts read DATACORE_LOCAL_COMPOSE_PROJECT, so without exporting it the
+  # DATACORE_COMPOSE_PROJECT knob renamed nothing and two installs still drove one set of
+  # containers: the second install reconciled the first install's running stack to its own config.
+  # The default is unchanged, so an existing install's containers keep their names across an upgrade.
+  DATACORE_LOCAL_COMPOSE_PROJECT="$COMPOSE_PROJECT"; export DATACORE_LOCAL_COMPOSE_PROJECT
   ok "configuration prepared (nothing for you to edit)"
 }
 
