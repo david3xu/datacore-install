@@ -61,6 +61,25 @@ fi
 export DC_REGISTRY_MIRRORS="$MIRRORS"
 export DC_RUNTIME_REGISTRY="$RUNTIME_REGISTRY"
 
+# Enabling a worker the install never provisioned needs a Runtime credential, and only the Runtime
+# can mint one. It is reachable through the bundle's compose file, so hand the JS the bundle
+# directory and the compose project; without a running stack it falls back to telling the user to
+# re-run the installer.
+export DC_BUNDLE_DIR="$ROOT/current"
+export DC_COMPOSE_PROJECT="$COMPOSE_PROJECT"
+
+# A worker in the registry is not yet a worker the Coordinator will dispatch to: dispatch is gated
+# on an *executor profile* matching the task's target agent, and the bundle ships a curated example
+# list that names claude and codex identities only. Enabling agy therefore produced a worker the
+# Runtime reported as live and every dispatch refused with "no executor profile ... matches this
+# task". The profiles are uniform apart from the agent they name, so generate them from the registry
+# instead of asking the user to hand-write JSON. $DATACORE_HOME/coordinator is already bind-mounted
+# into the Coordinator at /var/lib/datacore/coordinator, so the file needs no compose change.
+EXECUTORS="$DATA_HOME/coordinator/executors.json"
+EXECUTORS_IN_CONTAINER="/var/lib/datacore/coordinator/executors.json"
+COORDINATOR_ENV="$GEN/coordinator.env"
+export DC_EXECUTORS_PATH="$EXECUTORS"
+
 # ---------------------------------------------------------------- helpers
 
 die()  { printf '%s\n' "$1" >&2; exit 1; }
@@ -91,6 +110,67 @@ installed_clis() {
 
 # The bridge reads the registry when it starts, so a change while it is running is invisible until
 # it restarts. On a minimal install it is not running and there is nothing to do.
+# generated/ exists twice for the same reason the registry does: the install mirrors it into the
+# compose workspace, and `datacore doctor` compares the two and fails when they differ. Anything
+# this script changes under generated/ therefore has to be mirrored, or enabling a worker leaves a
+# blocking doctor failure behind.
+mirror_generated_file() {
+  _name=$1
+  _copy="$DATA_HOME/compose-workspaces/$COMPOSE_PROJECT/generated/$_name"
+  [ -f "$_copy" ] || return 0
+  cp "$GEN/$_name" "$_copy" 2>/dev/null || { warn "could not mirror $_name into the compose workspace"; return 0; }
+  chmod 600 "$_copy" 2>/dev/null || true
+}
+
+# The Coordinator reads its executor profiles from DATACORE_EXECUTOR_CONFIG_PATH, which the bundle
+# points at an example file baked into the image. Repoint it at the generated one, but only while it
+# still names that example: an operator who has curated their own list keeps it.
+point_coordinator_at_generated_executors() {
+  [ -f "$COORDINATOR_ENV" ] || return 0
+  _cur=$(grep '^DATACORE_EXECUTOR_CONFIG_PATH=' "$COORDINATOR_ENV" 2>/dev/null | head -1 | cut -d= -f2-)
+  case "$_cur" in
+    "$EXECUTORS_IN_CONTAINER") return 0 ;;                      # already ours
+    *executors.host-bridge.example.json|"") ;;                  # the bundle default, or unset
+    *) warn "leaving DATACORE_EXECUTOR_CONFIG_PATH at $_cur (not the bundle default)"; return 0 ;;
+  esac
+  _tmp="$COORDINATOR_ENV.tmp.$$"
+  if [ -n "$_cur" ]; then
+    sed "s|^DATACORE_EXECUTOR_CONFIG_PATH=.*|DATACORE_EXECUTOR_CONFIG_PATH=$EXECUTORS_IN_CONTAINER|" "$COORDINATOR_ENV" > "$_tmp"
+  else
+    cat "$COORDINATOR_ENV" > "$_tmp"
+    printf 'DATACORE_EXECUTOR_CONFIG_PATH=%s\n' "$EXECUTORS_IN_CONTAINER" >> "$_tmp"
+  fi
+  # coordinator.env holds the Runtime bearer token, so keep the private mode across the swap.
+  chmod 600 "$_tmp" 2>/dev/null || true
+  mv "$_tmp" "$COORDINATOR_ENV"
+  mirror_generated_file coordinator.env
+  COORDINATOR_ENV_REPOINTED=1
+}
+
+# Executor profiles are read when the Coordinator starts, so a change is invisible until it does.
+# An env_file change needs a recreate rather than a restart, which is why both paths exist.
+restart_coordinator_if_needed() {
+  [ -f "$EXECUTORS.changed" ] || [ "${COORDINATOR_ENV_REPOINTED:-0}" = 1 ] || return 0
+  rm -f "$EXECUTORS.changed"
+  _compose=''
+  if docker compose version >/dev/null 2>&1; then _compose='docker compose'
+  elif docker-compose version >/dev/null 2>&1; then _compose='docker-compose'
+  else
+    warn "executor profiles written, but no docker compose to restart the Coordinator — run: datacore restart"
+    return 0
+  fi
+  if [ "${COORDINATOR_ENV_REPOINTED:-0}" = 1 ]; then
+    _action='up -d coordinator'          # env_file changed: recreate so it is re-read
+  else
+    _action='restart coordinator'        # only the profiles changed
+  fi
+  if (cd "$ROOT/current" && $_compose -p "$COMPOSE_PROJECT" -f docker-compose.yml $_action >/dev/null 2>&1); then
+    ok "updated the Coordinator's executor profiles so these workers can be dispatched to"
+  else
+    warn "could not restart the Coordinator — run: datacore restart"
+  fi
+}
+
 restart_bridge_if_running() {
   _stop="$ROOT/current/stop-host-worker-bridge.sh"
   _start="$ROOT/current/start-host-worker-bridge.sh"
@@ -127,6 +207,9 @@ registry_tool() {
 // default profile. Nobody needs 29. This keeps the full set in the catalogue, which is where
 // `enable` takes tokens from, and leaves the registry holding only what was asked for.
 const { readFileSync, writeFileSync, existsSync, chmodSync } = require("fs");
+const { spawnSync } = require("child_process");
+const { mkdirSync } = require("fs");
+const { dirname } = require("path");
 
 const [cmd, registryPath, cataloguePath, configPath, ...rest] = process.argv.slice(2);
 
@@ -149,6 +232,141 @@ const MIRRORS = (process.env.DC_REGISTRY_MIRRORS || "")
 function writeRegistry(doc) {
   write(registryPath, doc);
   for (const p of MIRRORS) write(p, doc);
+  writeExecutors(doc);
+}
+
+// ---- executor profiles --------------------------------------------------------------------------
+//
+// The Coordinator refuses to dispatch a task unless an executor profile matches its target agent,
+// and the bundle ships a curated example list naming claude and codex identities only. A worker
+// enabled outside that list is live in the Runtime and undispatchable in practice:
+//
+//   "reason": "no executor profile in the current capability projection matches this task"
+//
+// The profiles are identical apart from the agent they name, the phases they serve and the MCP tool
+// bundle that follows from those phases, so derive them from the registry. Everything else is
+// copied from the bundle's own example, including the pull dispatch mode that makes the host bridge
+// claim the intent rather than the Coordinator running a command itself.
+const EXECUTORS_PATH = process.env.DC_EXECUTORS_PATH || "";
+const HOST_BRIDGE_COMMAND = ["/bin/sh", "/opt/datacore-platform/deploy/workers/ai-team/dispatch-via-host-bridge.sh"];
+const EXECUTOR_ENV_ALLOWLIST = [
+  "DATACORE_RUNTIME_BEARER_TOKEN",
+  "DATACORE_WORKER_BRIDGE_TOKEN",
+  "DATACORE_WORKER_BRIDGE_URL",
+  "WORKER_RUNTIME_TOKEN",
+  "WORKER_RUNTIME_URL",
+];
+
+function writeExecutors(doc) {
+  if (!EXECUTORS_PATH) return;
+  const workers = (doc.workers || []).filter((w) => !isInfra(w));
+  // assertReviewerIsolation rejects one agent serving both sides, so review and implementation
+  // stay separate profiles — which they already are, being separate families.
+  const isReview = (w) => (w.phases || []).every((p) => p === "review");
+  let defaultImpl = true;
+  let defaultReview = true;
+  const profiles = workers.map((w) => {
+    const review = isReview(w);
+    const profile = {
+      executor_id: String(w.agent_id).replace("@", "-"),
+      mode: "cli",
+      target_agent: w.agent_id,
+      dispatch_mode: "pull",
+      mcp_tool_bundles: [review ? "review_worker" : "implementation_worker"],
+      phases: [...(w.phases || [])],
+      command: [...HOST_BRIDGE_COMMAND],
+      env_allowlist: [...EXECUTOR_ENV_ALLOWLIST],
+      timeout_seconds: 30,
+      retry_budget: 1,
+      max_parallelism: 1,
+      working_directory: ".",
+    };
+    // One default per side, so a task that names no target still has somewhere to go. First wins,
+    // and the registry order is the bundle's own family order.
+    if (review && defaultReview) { profile.is_default = true; defaultReview = false; }
+    if (!review && defaultImpl) { profile.is_default = true; defaultImpl = false; }
+    return profile;
+  });
+  try {
+    mkdirSync(dirname(EXECUTORS_PATH), { recursive: true });
+    const next = JSON.stringify(profiles, null, 2) + "\n";
+    const prev = existsSync(EXECUTORS_PATH) ? readFileSync(EXECUTORS_PATH, "utf8") : "";
+    if (prev === next) return;
+    writeFileSync(EXECUTORS_PATH, next, "utf8");
+    // A stamp rather than a printed marker: the shell reads it to decide whether the Coordinator
+    // needs restarting, and a marker on stdout would have to be filtered back out of the output the
+    // user sees. The shell removes it either way, so it never accumulates.
+    writeFileSync(`${EXECUTORS_PATH}.changed`, "", "utf8");
+  } catch (err) {
+    console.error(`  ! could not write executor profiles to ${EXECUTORS_PATH}: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+// ---- provisioning a worker the install never minted a credential for --------------------------
+//
+// The install generates the registry from the default profile only, so a family the bundle flags
+// `inDefaultProfile: false` (agy) has no token and cannot be enabled. The old answer was "re-run
+// the whole installer with DATACORE_LOCAL_FULL_WORKER_REGISTRY=1", which re-mints every catalogued
+// identity — 29 of them — to use one. The Runtime can mint a single credential on request, so ask
+// it: `agent-create` through the bundle's compose file, the same call the installer makes.
+const WORKER_SCOPES = "events:read,events:write,facts:read,tasks:read,tasks:write";
+const BUNDLE_DIR = process.env.DC_BUNDLE_DIR || "";
+const COMPOSE_PROJECT = process.env.DC_COMPOSE_PROJECT || "datacore-local";
+
+function composeRunner() {
+  // `docker compose` on anything current, `docker-compose` on older installs. The bundle has a
+  // third path for machines with neither, but it is for bringing a stack up, not for talking to
+  // one that is already running, so a missing binary here means "cannot mint", not "try harder".
+  for (const [bin, lead] of [["docker", ["compose"]], ["docker-compose", []]]) {
+    const probe = spawnSync(bin, [...lead, "version"], { stdio: "ignore" });
+    if (probe.status === 0) return (args) => spawnSync(bin, [...lead, "-p", COMPOSE_PROJECT, "-f", "docker-compose.yml", ...args], { cwd: BUNDLE_DIR, encoding: "utf8" });
+  }
+  return null;
+}
+
+function runtimeCli(run, args) {
+  return run(["exec", "-T", "runtime", "/app/datacore", ...args]);
+}
+
+function mintToken(run, agentId) {
+  // The Runtime CLI prints its JSON to stdout on success and to stderr on a refusal, so read both
+  // rather than guessing: "already exists" is a refusal this function has to recognise and handle.
+  const parse = (res) => {
+    for (const text of [`${res.stdout || ""}`, `${res.stderr || ""}`]) {
+      const start = text.indexOf("{");
+      if (start < 0) continue;
+      try { return JSON.parse(text.slice(start)); } catch { /* try the other stream */ }
+    }
+    return null;
+  };
+  let doc = parse(runtimeCli(run, ["agent-create", "--agent-id", agentId, "--scopes", WORKER_SCOPES]));
+  // An identity left behind by an earlier install still exists in the Runtime but its token was
+  // never written here, and a token cannot be read back — only reissued. This is the installer's
+  // own behaviour for the same case.
+  if (doc?.error && /already exists/i.test(doc.error.message || "")) {
+    runtimeCli(run, ["agent-revoke", "--agent-id", agentId]);
+    doc = parse(runtimeCli(run, ["agent-create", "--agent-id", agentId, "--scopes", WORKER_SCOPES]));
+  }
+  if (doc?.error) throw new Error(doc.error.message || "agent-create failed");
+  if (!doc?.token) throw new Error("the Runtime returned no token");
+  return doc.token;
+}
+
+// The entry the bundle would have written for this family, had the family been in the default
+// profile. agy has no defaultModelAlias — the hosted manifest does not name one — so fall back to
+// the first alias the bundle lists, which is what the full registry used to enable.
+function provisionEntries(run, known, selAlias) {
+  const made = [];
+  for (const [fam, meta] of known) {
+    const alias = selAlias || meta.defaultAlias || meta.aliases[0];
+    if (!alias) throw new Error(`${fam} lists no model alias to enable`);
+    if (selAlias && !meta.aliases.includes(selAlias)) {
+      throw new Error(`${fam} has no model '${selAlias}'. It lists: ${meta.aliases.join(", ")}`);
+    }
+    const agentId = `${fam}@${alias}`;
+    made.push({ cli: meta.cli, model_alias: alias, agent_id: agentId, phases: [...meta.phases], token: mintToken(run, agentId) });
+  }
+  return made;
 }
 // The bridge dispatches by phase, so an entry with no phases is an identity rather than a dispatch
 // target: the MCP operator is one, and it carries cli:"claude-code" like any worker, so testing the
@@ -176,11 +394,15 @@ function families(path) {
     const seg = s.slice(m.index, m.index + 2000);
     const pick = (re) => (seg.match(re) || [])[1];
     const aliasRef = pick(/modelAliases:(\w+)/);
+    const phaseList = (seg.match(/phases:\[([^\]]*)\]/) || [])[1];
     out.set(m[1], {
       cli: pick(/cli:"([^"]+)"/),
       defaultAlias: pick(/defaultModelAlias:"([^"]+)"/),
       inDefault: /inDefaultProfile:(?:!0|true)/.test(seg),
       aliases: (aliasRef && arrays.get(aliasRef)) || [],
+      // Needed to build a registry entry for a family the install never provisioned: the bridge
+      // dispatches by phase, and an entry with no phases is read as an identity, not a worker.
+      phases: phaseList ? phaseList.split(",").map((x) => x.replace(/^"|"$/g, "")).filter(Boolean) : [],
     });
   }
   return out;
@@ -319,13 +541,41 @@ if (cmd === "enable" || cmd === "disable") {
       const aliasNote = known
         .map(([fam, meta]) => `${fam} (${meta.aliases.join(", ") || "no models listed"})`)
         .join("\n    ");
-      die(
-        `'${sel}' is a worker Datacore knows, but this install has no token for it.\n` +
-          `  The registry is generated with the default profile only. To provision every\n` +
-          `  catalogued model, re-run the install with the full registry:\n\n` +
-          `    DATACORE_LOCAL_FULL_WORKER_REGISTRY=1 datacore update\n\n` +
-          `  Then: datacore worker add ${sel}\n\n  Matched:\n    ${aliasNote}`,
-      );
+      // No token for this family, because the install provisions the default profile only. Mint
+      // one rather than sending the user back through the installer: a credential per worker is
+      // what the installer would have done, and doing it here provisions exactly the one asked
+      // for instead of all 29.
+      const run = BUNDLE_DIR ? composeRunner() : null;
+      if (!run) {
+        die(
+          `'${sel}' is a worker Datacore knows, but this install has no credential for it,\n` +
+            `  and the Runtime is not reachable to mint one (no docker compose on PATH).\n\n` +
+            `  Start the stack and try again:  datacore start\n\n  Matched:\n    ${aliasNote}`,
+        );
+      }
+      let made;
+      try {
+        made = provisionEntries(run, known, selAlias);
+      } catch (err) {
+        die(
+          `Could not provision '${sel}': ${err instanceof Error ? err.message : String(err)}\n\n` +
+            `  The Runtime has to be running to mint a worker credential. Check: datacore status\n` +
+            `  If it is running, the installer can still provision every catalogued model:\n\n` +
+            `    DATACORE_LOCAL_FULL_WORKER_REGISTRY=1 datacore update\n\n  Matched:\n    ${aliasNote}`,
+        );
+      }
+      // Keep the new credentials in the catalogue too, so removing and re-adding the worker later
+      // does not mint a second one — the catalogue is where `add` takes tokens from.
+      const catalogueHave = new Set(catalogue.workers.map((w) => w.agent_id));
+      catalogue.workers = [...catalogue.workers, ...made.filter((w) => !catalogueHave.has(w.agent_id))];
+      write(cataloguePath, catalogue);
+      const registryHave = new Set(registry.workers.map((w) => w.agent_id));
+      const fresh = made.filter((w) => !registryHave.has(w.agent_id));
+      registry.workers = [...registry.workers, ...fresh];
+      writeRegistry(registry);
+      console.log(`  provisioned ${made.length} credential(s) and enabled ${fresh.length} worker(s)`);
+      summarise(registry.workers);
+      process.exit(0);
     }
     const names = [...new Set(catalogue.workers.filter((w) => !isInfra(w)).map((w) => familyOf(w)))];
     die(`No worker matches '${sel}'.\n  Known: ${names.join(", ")}`);
@@ -390,6 +640,8 @@ cmd_add() {
   if [ -n "$_bin" ] && ! command -v "$_bin" >/dev/null 2>&1; then
     warn "the '$_bin' command is not on PATH, so nothing will be dispatched to it yet"
   fi
+  point_coordinator_at_generated_executors
+  restart_coordinator_if_needed
   restart_bridge_if_running
   say "  Run: datacore worker list"
 }
@@ -423,6 +675,8 @@ cmd_remove() {
   _name="${1:-}"
   [ -n "$_name" ] || { say "Usage: datacore worker remove <name>" >&2; exit 2; }
   registry_tool disable "$_name" || exit $?
+  point_coordinator_at_generated_executors
+  restart_coordinator_if_needed
   restart_bridge_if_running
   say "  Run: datacore worker list"
 }
@@ -435,6 +689,8 @@ cmd_remove() {
 cmd_prune() {
   # shellcheck disable=SC2046  # deliberate word splitting: one argument per installed CLI
   registry_tool prune $(installed_clis | tr '\n' ' ') || exit $?
+  point_coordinator_at_generated_executors
+  restart_coordinator_if_needed
   restart_bridge_if_running
 }
 
