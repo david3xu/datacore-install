@@ -740,6 +740,9 @@ Subcommands:
   remove <name>    disable a worker
   prune            reset to the lean default — one worker per default-profile
                    family, for the worker CLIs installed on this machine
+  sync             regenerate the Coordinator's executor profiles from the
+                   registry. The installer runs this for you; run it yourself
+                   if `datacore doctor` reports executor_config:file_present
 
 The bundle mints a token for every CLI x model x role combination it knows (29 of them). They are
 kept in a catalogue beside the registry; these subcommands move workers between the two, so
