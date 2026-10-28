@@ -95,13 +95,17 @@ download_and_verify() {
   TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
   if [ "$VERSION" = latest ]; then rel="$RELEASE_BASE/latest/download"; else rel="$RELEASE_BASE/download/$VERSION"; fi
 
-  archive="datacore-local-edition.tar.gz"
-  info "downloading $VERSION"
+  # One release carries one archive per architecture: the bundle ships Docker images, and an
+  # arm64 image cannot run on an x86_64 host. detect_platform set PLATFORM_ARCH.
+  archive="datacore-local-edition-${PLATFORM_ARCH}.tar.gz"
+  info "downloading $VERSION ($PLATFORM_ARCH)"
   fetch "$rel/$archive"   "$TMP/$archive"  || die "Could not download the release archive."
   fetch "$rel/SHA256SUMS" "$TMP/SHA256SUMS" || die "Could not download SHA256SUMS. Refusing to install an unverified archive."
 
   want=$(grep " $archive\$" "$TMP/SHA256SUMS" | cut -d' ' -f1 || true)
-  [ -n "$want" ] || die "SHA256SUMS does not list $archive."
+  [ -n "$want" ] || die "SHA256SUMS does not list $archive." \
+       "This release has no $PLATFORM_ARCH build. Published archives:
+$(sed -n 's/^[0-9a-f]* \{1,2\}/       /p' "$TMP/SHA256SUMS")"
   got=$(sha256_of "$TMP/$archive")
   [ "$want" = "$got" ] || die "Checksum mismatch — refusing to install." "expected $want
      actual $got"
