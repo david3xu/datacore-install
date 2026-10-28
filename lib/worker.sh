@@ -164,10 +164,18 @@ restart_coordinator_if_needed() {
   else
     _action='restart coordinator'        # only the profiles changed
   fi
-  if (cd "$ROOT/current" && $_compose -p "$COMPOSE_PROJECT" -f docker-compose.yml $_action >/dev/null 2>&1); then
+  if ! (cd "$ROOT/current" && $_compose -p "$COMPOSE_PROJECT" -f docker-compose.yml $_action >/dev/null 2>&1); then
+    warn "could not restart the Coordinator — run: datacore restart"
+    return 0
+  fi
+  # Restarting is not the same as succeeding. If the profiles were never written -- the
+  # directory is a bind-mount target and can be root-owned -- the Coordinator silently falls
+  # back to the example list in the image, and claiming success here hides that completely.
+  if [ -f "$EXECUTORS" ]; then
     ok "updated the Coordinator's executor profiles so these workers can be dispatched to"
   else
-    warn "could not restart the Coordinator — run: datacore restart"
+    warn "the Coordinator restarted, but no executor profiles were written to $EXECUTORS"
+    warn "it is still dispatching from the example list in the image; enabled workers outside that list will not be reached"
   fi
 }
 
@@ -298,7 +306,19 @@ function writeExecutors(doc) {
     // user sees. The shell removes it either way, so it never accumulates.
     writeFileSync(`${EXECUTORS_PATH}.changed`, "", "utf8");
   } catch (err) {
-    console.error(`  ! could not write executor profiles to ${EXECUTORS_PATH}: ${err instanceof Error ? err.message : err}`);
+    // Docker creates a missing bind-mount source as root, so on an install that started
+    // containers before this directory existed, nothing running as the user can write here.
+    // Say what to do about it: a silent failure here means the Coordinator keeps dispatching
+    // from the example list in the image and every worker outside it is quietly unreachable.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`  ! could not write executor profiles to ${EXECUTORS_PATH}: ${msg}`);
+    if (/EACCES|EPERM/.test(msg)) {
+      console.error(`  ! ${dirname(EXECUTORS_PATH)} is not writable by you — Docker created it as root.`);
+      console.error(`  ! fix it with:  sudo chown -R "$(id -u):$(id -g)" ${dirname(EXECUTORS_PATH)}`);
+      console.error("  ! then run:     datacore worker sync");
+    }
+    console.error("  ! until then the Coordinator dispatches from the example list in the image,");
+    console.error("  ! and enabled workers outside that list will not be reached.");
   }
 }
 
@@ -462,6 +482,18 @@ catalogue.workers = catalogue.workers || [];
 
 const fams = families(configPath);
 
+if (cmd === "sync") {
+  // Executor profiles are a pure function of the registry, but they used to be written only as a
+  // side effect of writeRegistry() -- so an install whose registry came from the bundle's own
+  // generator produced none at all, the Coordinator fell back to the example list baked into the
+  // image, and every worker outside that list was undispatchable. Regenerating them from whatever
+  // the registry currently says makes the two consistent no matter how the registry got there.
+  writeExecutors(registry);
+  const n = (registry.workers || []).filter((w) => !isInfra(w)).length;
+  console.log(`  executor profiles synced for ${n} worker(s)`);
+  process.exit(0);
+}
+
 if (cmd === "list") {
   // Report against the copy the bridge actually reads. A mismatch between the two means something
   // wrote one without the other — the bundle regenerating its copy on upgrade, or an older version
@@ -489,7 +521,7 @@ if (cmd === "list") {
       const aliases = meta.aliases.length ? `${meta.aliases.length} model(s)` : "no models listed";
       console.log(`    ${fam}  (${meta.cli || "unknown cli"}, ${aliases})`);
     }
-    console.log("  Provisioning those needs the installer — see: datacore worker add <name>");
+    console.log("  `datacore worker add <name>` provisions one of these for you.");
   }
   process.exit(0);
 }
@@ -719,6 +751,14 @@ EOF
   exit 0
 }
 
+# Regenerate executor profiles from the registry and make the Coordinator read them. Safe to run
+# at any time and on every install: it rewrites only when the content actually changes.
+cmd_sync() {
+  registry_tool sync || exit $?
+  point_coordinator_at_generated_executors
+  restart_coordinator_if_needed
+}
+
 # ---------------------------------------------------------------- dispatch
 
 subcmd="${1:-}"; [ $# -gt 0 ] && shift || true
@@ -728,5 +768,6 @@ case "$subcmd" in
   list)   cmd_list   "$@" ;;
   remove) cmd_remove "$@" ;;
   prune)  cmd_prune  "$@" ;;
+  sync)   cmd_sync   "$@" ;;
   *) printf 'Unknown subcommand: %s\nRun: datacore worker --help\n' "$subcmd" >&2; exit 2 ;;
 esac

@@ -8,13 +8,18 @@ This repository holds the installer and documentation. **It contains no Datacore
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.79/install.sh | sh
 ```
+
+The URL names a release on purpose. Fetching the installer from `main` would mean the script and
+the bundle it downloads could both change under you, so the same command would install different
+software on different days. Installing from a tag is reproducible: that command does the same thing
+next month as it does today. To track the newest release instead, set `DATACORE_VERSION=latest`.
 
 Prefer to read before you run? That is the better habit:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh
+curl -fsSLO https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.79/install.sh
 less install.sh
 sh install.sh
 ```
@@ -97,9 +102,23 @@ datacore worker remove agy                 # disable
 datacore worker prune                      # back to the lean default
 ```
 
-Two things gate dispatch besides the registry, and both fail quietly: the worker's CLI has to
-resolve on `PATH` (`datacore doctor` checks this), and `DATACORE_WORKER_PROJECT_WORKSPACES` in the
-bundle `.env` has to map your project name to a git repository.
+```bash
+datacore worker sync                       # regenerate executor profiles from the registry
+```
+
+Three things gate dispatch besides the registry, and all three fail quietly:
+
+1. **The worker's CLI has to resolve on `PATH`.** `datacore doctor` checks this.
+2. **That CLI has to be logged in.** Datacore only checks that the command exists — it cannot tell
+   an authenticated CLI from one that will refuse on first use. Run the CLI once yourself and
+   confirm it answers before expecting Datacore to dispatch to it.
+3. **`DATACORE_WORKER_PROJECT_WORKSPACES`** in the bundle `.env` has to map your project name to a
+   git repository.
+
+A fourth used to fail quietly and no longer does: the Coordinator dispatches from executor
+profiles, which the installer now generates from your registry on every install. If they are ever
+missing, `datacore doctor` reports `executor_config:file_present` and `datacore worker sync`
+rebuilds them.
 
 ### Starting at login
 

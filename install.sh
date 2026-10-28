@@ -1,10 +1,11 @@
 #!/bin/sh
 # Datacore installer.
 #
-# Usage:  curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh | sh
+# Usage:  curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.79/install.sh | sh
 #
 # Environment overrides:
-#   DATACORE_VERSION        version to install (default: latest)
+#   DATACORE_VERSION        version to install (default: the release this installer ships with,
+#                           printed below as PINNED_RELEASE; pass `latest` to track the newest)
 #   DATACORE_RELEASE_BASE   base URL for release artifacts
 #   DATACORE_INSTALL_ROOT   where versions are kept (default: ~/.datacore)
 #   DATACORE_HOME           runtime data directory (default: ~/.datacore-local)
@@ -18,7 +19,13 @@
 
 set -eu
 
-VERSION="${DATACORE_VERSION:-latest}"
+# The release this installer was cut with. Defaulting to `latest` made the install
+# irreproducible by construction: the same command run on two days installed different
+# software, and nothing recorded which. An installer fetched at a tag now installs the
+# bundle from that same tag, so a command that worked once works the same way forever.
+# Release tooling rewrites this line; `latest` remains available on request.
+PINNED_RELEASE="v0.1.79"
+VERSION="${DATACORE_VERSION:-$PINNED_RELEASE}"
 RELEASE_BASE="${DATACORE_RELEASE_BASE:-https://github.com/david3xu/datacore-install/releases}"
 INSTALL_ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
 # Data lives under the install root by default, not in a fixed $HOME/.datacore-local. That shared
@@ -337,7 +344,11 @@ Full output: $_envlog"
   else
     printf 'DATACORE_HOME=%s\n' "$DATA_HOME" >> .env
   fi
-  mkdir -p "$DATA_HOME"
+  # Create the bind-mount targets before anything starts. Docker creates a missing bind
+  # source itself, as root, and then nothing running as the user can write into it -- which
+  # is why generated executor profiles failed with EACCES on a fresh install while the
+  # Coordinator quietly fell back to the example list baked into the image.
+  mkdir -p "$DATA_HOME" "$DATA_HOME/coordinator" "$DATA_HOME/runtime"
 
   # The bundle's preflight hard-fails without a worker project map, even though a minimal
   # install never reads it. Supply a valid default so the user is never asked to write JSON.
@@ -433,6 +444,15 @@ lean_workers() {
     return 0
   fi
   printf '%s\n' "$_out"
+  # Executor profiles are what the Coordinator dispatches from, and they used to be written only
+  # as a side effect of enabling a worker through this helper. An install whose registry came
+  # from the bundle's generator produced none, so the Coordinator silently fell back to the
+  # example list in the image and workers outside it were undispatchable. Sync unconditionally:
+  # it is idempotent, and it makes the profiles agree with the registry however the registry
+  # was produced. An older helper has no `sync` verb, so a failure here is reported, not fatal.
+  if ! DATACORE_INSTALL_ROOT="$INSTALL_ROOT" DATACORE_HOME="$DATA_HOME" sh "$_w" sync >/dev/null 2>&1; then
+    info "executor profiles not synced (this release's lib/worker.sh has no 'sync')"
+  fi
   _n=$(printf '%s\n' "$_out" | sed -n 's/^  \([0-9]\{1,\}\) worker(s) enabled.*/\1/p' | tail -1)
   if [ "${_n:-0}" = 0 ]; then
     WORKERS_SUMMARY="none — no worker CLI installed (claude, codex, agy)"

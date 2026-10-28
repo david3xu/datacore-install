@@ -77,7 +77,7 @@ jobs:
           set -eu
           test -L ~/.datacore/current
           test -x ~/.datacore/bin/datacore
-          test -f ~/.datacore/data/.eula-accepted
+          test -f ~/.datacore/.eula-accepted
           grep -q "^DATACORE_HOME=$HOME/.datacore/data$" ~/.datacore/current/.env
           # The fixed path both this installer and the bundle's own generator used to default to.
           # Anything here means a second install on this machine would adopt the first one's data.
