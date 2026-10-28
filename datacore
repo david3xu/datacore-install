@@ -8,12 +8,25 @@
 
 set -eu
 
-ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
+# The installer places this script at <install root>/bin/datacore, so our own location is the
+# install we belong to. Trust it over a guess at $HOME: an install with a custom
+# DATACORE_INSTALL_ROOT must keep working without the user exporting anything.
+_SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || _SELF_DIR=""
+if [ -n "${DATACORE_INSTALL_ROOT:-}" ]; then
+  ROOT="$DATACORE_INSTALL_ROOT"
+elif [ -n "$_SELF_DIR" ] && [ -d "$_SELF_DIR/../versions" ]; then
+  ROOT=$(cd "$_SELF_DIR/.." && pwd)
+else
+  ROOT="$HOME/.datacore"
+fi
 C="$ROOT/current"
+
+# `datacore update` re-runs the installer, which is what knows how to fetch the latest release and
+# hand the previous install to the new bundle's upgrade step. Overridable for a private mirror.
+INSTALLER_URL="${DATACORE_INSTALLER_URL:-https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh}"
 
 # The bundle scripts exec `bun`. On a machine without it the installer put a private copy next to
 # this script, so put our own directory on PATH rather than making the user edit their shell rc.
-_SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || _SELF_DIR=""
 if [ -n "$_SELF_DIR" ]; then
   PATH="$_SELF_DIR:$PATH"
   export PATH
@@ -34,6 +47,18 @@ run_lib_script() {
   _lib="${_self}/lib/$1"; shift
   [ -f "$_lib" ] || die "lib/$1 not found alongside the datacore command. Re-run the installer."
   exec sh "$_lib" "$@"
+}
+
+run_installer() {
+  command -v curl >/dev/null 2>&1 || die "curl is needed to fetch the installer."
+  [ $# -eq 0 ] || die "datacore update takes no arguments."
+  DATACORE_INSTALL_ROOT="$ROOT"; export DATACORE_INSTALL_ROOT
+  printf 'Fetching the installer from %s\n\n' "$INSTALLER_URL"
+  _tmp=$(mktemp) || die "Could not create a temporary file."
+  curl -fsSL --retry 3 -o "$_tmp" "$INSTALLER_URL" || { rm -f "$_tmp"; die "Could not download the installer from $INSTALLER_URL"; }
+  sh "$_tmp"; _status=$?
+  rm -f "$_tmp"
+  exit $_status
 }
 
 run_bundle_script() {
@@ -67,8 +92,9 @@ Data:
   restore     restore from a backup
 
 Lifecycle:
-  update      upgrade in place, with automatic rollback on failure
-  uninstall   remove everything, including AI client config entries
+  update      fetch the latest release and upgrade in place, rolling back on failure
+  uninstall   remove containers, AI client entries, the login agent and the install
+              (--purge-data also deletes your data, --purge-images the loaded images)
 
 Providers:
   provider    configure a model API key (add/list/remove)
@@ -98,8 +124,8 @@ case "$verb" in
   stop)      run_bundle_script stop      stop-datacore-local.sh      "$@" ;;
   backup)    run_bundle_script backup    backup-datacore-local.sh    "$@" ;;
   restore)   run_bundle_script restore   restore-datacore-local.sh   "$@" ;;
-  update)    run_bundle_script update    update-datacore-local.sh    "$@" ;;
-  uninstall) run_bundle_script uninstall uninstall-datacore-local.sh "$@" ;;
+  update)    run_installer "$@" ;;
+  uninstall) run_lib_script uninstall.sh "$@" ;;
 
   connect)  not_yet connect "Re-run the installer; it registers every AI client it finds." ;;
   enable)   not_yet enable  "Workers are turned on with: datacore worker add" ;;

@@ -38,6 +38,7 @@ SELF_DIR=""
 [ -f "$0" ] && SELF_DIR=$(cd "$(dirname "$0")" 2>/dev/null && pwd) || true
 BUNDLE_DIR=""
 SUMS_FILE=""
+PREVIOUS_DIR=""
 
 # ---------------------------------------------------------------- output helpers
 
@@ -201,6 +202,13 @@ $(sed -n 's/^[0-9a-f]* \{1,2\}/       /p' "$TMP/SHA256SUMS")"
      actual $got"
   ok "archive verified (sha256 ${got%"${got#??????????}"}…)"
 
+  # Resolve the install we are replacing before the pointer moves. A new version lands in its own
+  # directory with a template .env, so without this the upgrade would mint fresh secrets and no
+  # longer match the existing database, bridge token or client tokens.
+  if [ -d "$INSTALL_ROOT/current" ]; then
+    PREVIOUS_DIR=$(cd "$INSTALL_ROOT/current" 2>/dev/null && pwd -P || true)
+  fi
+
   mkdir -p "$INSTALL_ROOT/versions"
   tar -xzf "$TMP/$archive" -C "$INSTALL_ROOT/versions"
   BUNDLE_DIR=$(find "$INSTALL_ROOT/versions" -maxdepth 1 -name 'datacore-local-edition-*' -type d | sort | tail -1)
@@ -214,7 +222,13 @@ $(sed -n 's/^[0-9a-f]* \{1,2\}/       /p' "$TMP/SHA256SUMS")"
     || die "The 'current' pointer does not resolve to the installed version." \
            "expected $BUNDLE_DIR
      resolved $resolved"
-  ok "installed $(basename "$BUNDLE_DIR")"
+  # Same version re-installed, or no previous install: nothing to inherit.
+  if [ "$PREVIOUS_DIR" = "$BUNDLE_DIR" ] || [ ! -f "$PREVIOUS_DIR/.env" ]; then PREVIOUS_DIR=''; fi
+  if [ -n "$PREVIOUS_DIR" ]; then
+    ok "installed $(basename "$BUNDLE_DIR") (upgrade from $(basename "$PREVIOUS_DIR"))"
+  else
+    ok "installed $(basename "$BUNDLE_DIR")"
+  fi
 }
 
 # ---------------------------------------------------------------- 4. licence
@@ -236,6 +250,12 @@ accept_eula() {
 
 prepare_env() {
   cd "$BUNDLE_DIR"
+  if [ -n "$PREVIOUS_DIR" ]; then
+    # The new bundle's update step merges its own template with the previous install's real values.
+    # Touching .env here would make that step treat it as hand-edited and skip the merge.
+    info "upgrade: configuration will be inherited from $(basename "$PREVIOUS_DIR")"
+    return
+  fi
   [ -f .env ] || cp .env.example .env
 
   # DATACORE_HOME ships as a change-me placeholder; the installer owns it, the user never sees it.
@@ -261,17 +281,32 @@ prepare_env() {
 
 start_stack() {
   cd "$BUNDLE_DIR"
-  if [ -f "$DATA_HOME/.last-good-bundle" ]; then _cmd=./start-datacore-local.sh
-  else _cmd=./install-datacore-local.sh; fi
+  if [ -n "$PREVIOUS_DIR" ]; then
+    # The bundle's own upgrade path: start this version's .env from its template, inherit the
+    # previous install's secrets and generated state, install, then relabel client config.
+    _cmd=./update-datacore-local.sh; set -- "$PREVIOUS_DIR"
+  elif [ -f "$DATA_HOME/.last-good-bundle" ]; then
+    _cmd=./start-datacore-local.sh; set --
+  else
+    _cmd=./install-datacore-local.sh; set --
+  fi
 
-  # Keep the output: "run doctor.sh" is useless advice when the reason is already on screen, and
-  # doctor cannot explain a failure that happened while loading images.
-  # Worker families are opt-in (`datacore worker add`), but the bundle's own doctor gate fails the
-  # install when the claude or codex CLI is merely absent — true of most machines, and of every
-  # machine that only wants memory, tasks and search. Skip that gate and apply our own below, so a
-  # real inconsistency still stops the install.
+  # Two things about this call. The bundle's doctor gate fails when the claude or codex CLI is
+  # merely absent, but worker families are opt-in, so skip that gate and apply our own below —
+  # a real inconsistency still stops the install. And keep the output: "run doctor.sh" is useless
+  # advice when the reason is already on screen, and doctor cannot explain a failure that happened
+  # while loading images.
   _log="${TMPDIR:-/tmp}/datacore-start.$$.log"
-  if ! DATACORE_LOCAL_EDITION_SKIP_DOCTOR_GATE=1 "$_cmd" >"$_log" 2>&1; then
+  if ! DATACORE_LOCAL_EDITION_SKIP_DOCTOR_GATE=1 "$_cmd" "$@" >"$_log" 2>&1; then
+    # An upgrade that cannot start must not leave `current` pointing at the new version: put the
+    # pointer back so `datacore start` and the login agent keep using the install that worked.
+    if [ -n "$PREVIOUS_DIR" ]; then
+      ln -sfn "$PREVIOUS_DIR" "$INSTALL_ROOT/current.new" && mv -f "$INSTALL_ROOT/current.new" "$INSTALL_ROOT/current"
+      die "The upgrade failed; rolled back to $(basename "$PREVIOUS_DIR")." "$(tail -12 "$_log")
+
+Full output: $_log
+The previous version is still installed. Start it with: datacore start"
+    fi
     die "Datacore failed to start." "$(tail -12 "$_log")
 
 Full output: $_log
@@ -372,7 +407,7 @@ register_clients() {
 # The front door is three files: the `datacore` dispatcher and the two lib scripts it execs for
 # `provider` and `worker`. Installing only the dispatcher leaves those verbs dead, so place all
 # three. Prefer siblings of this script (local run / dev); otherwise take them from the release.
-CLI_FILES="datacore lib/provider.sh lib/worker.sh"
+CLI_FILES="datacore lib/provider.sh lib/worker.sh lib/uninstall.sh"
 
 install_command() {
   mkdir -p "$BIN_DIR/lib"
