@@ -89,6 +89,68 @@ Nothing is hand-edited. You will not be asked to open a file in an editor.
 A minimal install is a complete product: memory, tasks and search inside your AI client. Model
 execution is opt-in and configured later, only if you want it.
 
+### Your first worker, start to finish
+
+This is the whole path on a machine with no AI CLI yet, which is the usual starting point. Every
+line of output below is what the install actually prints, not a sketch.
+
+**1. Install.** On a clean machine the summary ends like this:
+
+```
+  Runtime    http://127.0.0.1:43123
+  MCP        not registered
+  Workers    none — no worker CLI installed (claude, codex, agy)
+  Projects   none mapped — nothing can be dispatched yet
+```
+
+That is a working install. Memory, tasks and search are already usable from an AI client; workers
+are the opt-in part.
+
+**2. Expect `datacore doctor` to report failures at this point, and do not be alarmed by them.**
+The installer says `✓ doctor: no blocking failures (2 optional worker CLI not installed)` while
+`datacore doctor` run by hand says `16 ok, 3 fail, 3 skip`. Both are right and they are describing
+the same machine. The three are:
+
+| Failure | Why, on a clean machine |
+|---|---|
+| `bridge_dispatch:launcher:claude` | `claude` is not on `PATH`, so no claude worker can be launched |
+| `bridge_dispatch:launcher:codex` | same, for `codex` |
+| `executor_config:has_entries` | no workers are enabled yet, so there are no executor profiles to project |
+
+All three clear in step 4. Until then they are the honest description of a machine that cannot
+dispatch yet, not damage. `datacore doctor`'s remediation line for the launchers suggests setting
+`DATACORE_CLAUDE_CODE_BIN` in the bundle `.env`; you do not need to. Putting the CLI on `PATH` is
+enough, and is the supported way.
+
+**3. Install and log into an AI CLI.** Datacore dispatches to the CLI you already use — it does not
+ship one. Install `claude` or `codex`, then **run it once yourself** and confirm it answers.
+Datacore can only check that the command exists; it cannot tell an authenticated CLI from one that
+will refuse on first use.
+
+**4. Enable it.**
+
+```bash
+datacore worker add claude     # or: codex
+datacore worker list           # confirm
+datacore doctor                # the three failures above are now gone
+```
+
+Nothing needs reinstalling. `worker add` regenerates the Coordinator's executor profiles and
+restarts the worker bridge for you.
+
+**5. Map a project.** Nothing is dispatched until the task's project points at a repository:
+
+```bash
+datacore project link my-project ~/Developer/my-repo
+datacore project list
+```
+
+**6. Restart your AI client** and ask it *"what tasks do I have?"*. If it answers, the MCP
+connection is live and the loop is closed.
+
+If something still does not dispatch, the three gates in [Workers](#workers) are the things to
+check, in that order — and all three fail quietly, which is why they are listed there explicitly.
+
 ### Projects
 
 A worker is dispatched **into a git repository**, and which one is decided by the task's project

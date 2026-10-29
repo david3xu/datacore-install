@@ -1003,3 +1003,112 @@ jobs:
           fi
           grep -q "not-written-yet.sh" "$T/out" || { cat "$T/out"; echo "::error::refusal does not name the missing helper"; exit 1; }
           echo "refused, naming the helper that does not exist"
+
+  first-worker:
+    name: a new user can set up a worker by following the README
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The README's "Your first worker, start to finish" walkthrough makes claims about what a
+      # clean machine prints and which doctor failures are expected before any AI CLI exists. A
+      # walkthrough nobody executes drifts into fiction, and this is the page a new user follows,
+      # so every step of it runs here -- deliberately with no `claude` on PATH at install time,
+      # which is the state the walkthrough actually describes.
+      - name: Install with no AI CLI present, as the walkthrough's step 1
+        env:
+          DATACORE_ACCEPT_EULA: '1'
+        run: |
+          set -eu
+          command -v claude >/dev/null 2>&1 && { echo "::error::a claude CLI exists; this job must start without one"; exit 1; } || true
+          cmd=$(grep -m1 '^curl -fsSL .*install.sh | sh$' README.md)
+          test -n "$cmd" || { echo "::error::no one-liner in README.md"; exit 1; }
+          sh -c "$cmd" > install.log 2>&1 || { cat install.log; exit 1; }
+          tail -14 install.log
+
+      - name: The summary says what the walkthrough says it says
+        run: |
+          set -eu
+          grep -q "no worker CLI installed" install.log \
+            || { echo "::error::step 1 of the walkthrough shows 'Workers none — no worker CLI installed'; the install did not print that"; grep -i workers install.log || true; exit 1; }
+          grep -q "nothing can be dispatched yet" install.log \
+            || { echo "::error::the walkthrough shows 'Projects none mapped — nothing can be dispatched yet'"; grep -i projects install.log || true; exit 1; }
+          echo "the clean-machine summary matches the walkthrough"
+
+      # The walkthrough names three failures and tells the reader they are expected. If the real
+      # set differs -- more, fewer, or different names -- the table in the README is wrong and a
+      # new user is either alarmed by an unlisted failure or told to ignore one that matters.
+      - name: doctor fails on exactly the three the README tells the reader to expect
+        run: |
+          set -eu
+          ~/.datacore/bin/datacore doctor > doctor.log 2>&1 || true
+          # Unanchored, like the other doctor checks in this file: the status line may carry a
+          # leading glyph or indent, and anchoring on it would silently match nothing -- a check
+          # that compares two empty sets and passes.
+          # Keep only tokens shaped like a check name (`group:check`). Matching ' FAIL ' alone also
+          # catches prose that happens to contain the word, which would make the comparison below
+          # fail against sentences instead of checks.
+          got=$(grep ' FAIL ' doctor.log | sed -E 's/.* FAIL ([A-Za-z0-9_:.-]+).*/\1/' | grep -E '^[a-z_]+:' | sort -u)
+          test -n "$got" || { echo "::error::parsed no FAIL names out of doctor's output; the format changed"; cat doctor.log; exit 1; }
+          want=$(printf '%s\n' bridge_dispatch:launcher:claude bridge_dispatch:launcher:codex executor_config:has_entries | sort)
+          echo "doctor failures on a clean machine:"; printf '%s\n' "$got" | sed 's/^/  /'
+          if [ "$got" != "$want" ]; then
+            echo "::error::the README's expected-failure table is out of date"
+            diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true
+            exit 1
+          fi
+          for name in $got; do
+            grep -q "$name" README.md || { echo "::error::$name fails on a clean install and is not in the README's table"; exit 1; }
+          done
+          echo "all three are named in the README"
+
+      - name: Install a CLI, then `worker add` clears all three — the walkthrough's step 4
+        run: |
+          set -eu
+          mkdir -p ~/bin ~/stub
+          cat > ~/bin/claude <<'STUB'
+          #!/bin/sh
+          ENT="$HOME/stub/entry.txt"
+          case "$1 $2" in
+            "mcp add")    shift 2; printf '%s\n' "$*" > "$ENT"; exit 0 ;;
+            "mcp remove") rm -f "$ENT"; exit 0 ;;
+            "mcp get")    [ -f "$ENT" ] || exit 1
+                          cat "$ENT"
+                          echo "To remove this server, run: claude mcp remove datacore -s user"
+                          exit 0 ;;
+          esac
+          exit 1
+          STUB
+          chmod +x ~/bin/claude
+          export PATH="$HOME/bin:$PATH"
+
+          # The walkthrough promises this one command is enough: no reinstall, no `worker sync`.
+          ~/.datacore/bin/datacore worker add claude
+          ~/.datacore/bin/datacore worker list
+
+          n=$(python3 -c "
+          import json, os
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          print(sum(1 for w in reg if w.get('phases')))")
+          echo "dispatchable workers: $n"
+          test "$n" -ge 1 || { echo "::error::worker add enabled nothing, so the walkthrough's step 4 is wrong"; exit 1; }
+
+          ~/.datacore/bin/datacore doctor > doctor2.log 2>&1 || true
+          still=$(grep ' FAIL ' doctor2.log | sed -E 's/.* FAIL ([A-Za-z0-9_:.-]+).*/\1/' | grep -E '^[a-z_]+:' | grep -vE 'launcher:codex' | sort -u || true)
+          if [ -n "$still" ]; then
+            echo "::error::the README says worker add clears these, and it did not:"
+            printf '%s\n' "$still"
+            exit 1
+          fi
+          echo "worker add cleared the claude launcher and the executor-profile failure"
+
+      - name: Mapping a project works before any task exists — the walkthrough's step 5
+        run: |
+          set -eu
+          mkdir -p ~/repo && git -C ~/repo init -q && git -C ~/repo commit -q --allow-empty -m init
+          ~/.datacore/bin/datacore project link my-project ~/repo
+          ~/.datacore/bin/datacore project list | tee project.log
+          grep -q "my-project" project.log \
+            || { echo "::error::the walkthrough maps a project before any task exists and that failed"; exit 1; }
+          echo "a project maps with no prior task, as the README states"
