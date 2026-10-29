@@ -26,7 +26,7 @@ So the asset set is not written down twice. `make-release.sh` derives it from `i
 Build both architectures first. A release with one architecture 404s for everyone on the other.
 
 ```bash
-sh make-release.sh v0.1.80 /path/to/bundle/latest/download
+sh make-release.sh v0.1.81 /path/to/bundle/latest/download
 ```
 
 It stages into `dist/<version>/`, writes `SHA256SUMS`, verifies its own output, and prints the
@@ -40,8 +40,8 @@ upload commands. It refuses to:
 It does not upload and does not publish. Both are deliberate.
 
 ```bash
-gh release upload v0.1.80 --repo <owner>/datacore-install dist/v0.1.79/* --clobber
-gh release edit   v0.1.80 --repo <owner>/datacore-install --draft=false
+gh release upload v0.1.81 --repo <owner>/datacore-install dist/v0.1.79/* --clobber
+gh release edit   v0.1.81 --repo <owner>/datacore-install --draft=false
 ```
 
 ## The last step is the one that is easy to forget
@@ -49,7 +49,7 @@ gh release edit   v0.1.80 --repo <owner>/datacore-install --draft=false
 `--draft=false`. Until then the tag is not pushed, and the first command in the README —
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.80/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.81/install.sh | sh
 ```
 
 — returns `404`. A draft release is fully visible to you and invisible to everyone else, which is
@@ -59,7 +59,7 @@ Verify after publishing:
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' \
-  https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.80/install.sh      # expect 200
+  https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.81/install.sh      # expect 200
 ```
 
 CI covers all of this in two jobs: *the pinned release is stated the same way everywhere* checks the

@@ -35,7 +35,7 @@ RELEASE_URL="${RELEASE_URL:-https://raw.githubusercontent.com/david3xu/datacore-
 # Derived from the installer's own pin rather than repeated, so the proof always names the
 # release the installer will actually fetch.
 _pin=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' "$(dirname "$0")/../install.sh" 2>/dev/null)
-DATACORE_VERSION="${DATACORE_VERSION:-${_pin:-v0.1.80}}"
+DATACORE_VERSION="${DATACORE_VERSION:-${_pin:-v0.1.81}}"
 
 FAILURES=0
 PHASE=""

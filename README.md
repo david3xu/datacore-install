@@ -8,7 +8,7 @@ This repository holds the installer and documentation. **It contains no Datacore
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.80/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.81/install.sh | sh
 ```
 
 The URL names a release on purpose. Fetching the installer from `main` would mean the script and
@@ -19,7 +19,7 @@ next month as it does today. To track the newest release instead, set `DATACORE_
 Prefer to read before you run? That is the better habit:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.80/install.sh
+curl -fsSLO https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.81/install.sh
 less install.sh
 sh install.sh
 ```
@@ -148,7 +148,7 @@ written and the install says so (`MCP  not registered`). Re-run the installer â€
 reuses the installed bundle and registers every AI client it now finds:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.80/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.81/install.sh | sh
 ```
 
 Then restart the client and ask it *"what tasks do I have?"*. If it answers, the loop is closed.
