@@ -1688,13 +1688,22 @@ jobs:
         run: |
           set -eu
           export PATH="$HOME/bin:$PATH"
-          cmd=$(grep -m1 '^curl -fsSL .*install.sh | sh$' README.md)
-          test -n "$cmd" || { echo "::error::no one-liner in README.md"; exit 1; }
-          sh -c "$cmd" > new.log 2>&1 || { cat new.log; exit 1; }
+          # Upgrade with the checkout's installer, which is what a release will carry: install.sh
+          # prefers sibling helpers, so this exercises lib/worker.sh as it stands here against a
+          # real older install. Upgrading via the README one-liner instead would fetch the pinned
+          # release's helpers, so every fix would have to ship before it could be tested -- and the
+          # defect this job exists for was found exactly that way round. The published upgrade path
+          # is covered by the `published` job and by the meta-worker reinstall assertion.
+          sh install.sh > new.log 2>&1 || { cat new.log; exit 1; }
           tail -8 new.log
-          grep -q 'DATACORE_WORKER_PRIOR_REGISTRY' ~/.datacore/bin/lib/worker.sh \
-            || { echo "::error::the upgrade did not install a lib/worker.sh carrying the prune fix"; exit 1; }
-          echo "upgraded, and the new helper carries the fix"
+
+          # A guard, so the job cannot quietly test an older helper than the checkout's.
+          w=~/.datacore/bin/lib/worker.sh
+          grep -qF 'DATACORE_WORKER_PRIOR_REGISTRY' "$w" \
+            || { echo "::error::the installed lib/worker.sh has no prune fix, so it is not the checkout's"; exit 1; }
+          grep -qF 'worker identity/identities from the previous install' "$w" \
+            || { echo "::error::the installed lib/worker.sh has no catalogue recovery, so it is not the checkout's"; exit 1; }
+          echo "upgraded with the checkout's installer, and the installed helper is the checkout's"
 
       # Printed unconditionally, before the assertion, so a failure arrives with its evidence
       # rather than needing a second run to collect it.
