@@ -58,7 +58,7 @@ a release, not a setting.
 ```bash
 muse login                                  # account login; no API key needed
 datacore worker add muse                    # enables muse-worker and muse-review
-datacore report                             # says whether anything is still in the way
+datacore report                             # checks configuration; does not run a task
 ```
 
 Two things about Muse differ from the Claude and Codex launchers, and both are worth knowing
@@ -83,13 +83,15 @@ An inline literal is rejected outright. The Codex `-c` form does not enforce tha
 reach a process listing there and cannot here. On this one point a Muse worker is the safest of the
 four.
 
-**What is proven, and what is not.** CI installs from the README's one-liner on a clean runner and
-asserts the whole path: the launcher check skipped with nothing enabled, failing when a worker is
+**What is proven, and what is not.** CI installs from the README's unattended command on a clean
+runner and checks the launcher states: skipped with nothing enabled, failing when a worker is
 enabled and the binary is absent, OK once it resolves, the registry entry carrying `cli: muse` with
-real phases, and the worker surviving a reinstall. It does **not** prove that a Meta model answered
+real phases, and the worker surviving a reinstall. The stub proves command detection; doctor does
+not execute it. This does **not** prove that a Meta model answered
 — a real `muse` needs `muse login` against an account, and that credential does not belong in
-public CI, so the job uses a stub binary. The end-to-end hop is verified by hand on a logged-in
-machine; the argv the launcher builds is covered by unit tests in the platform repo.
+public CI. The end-to-end Meta task round trip remains unverified. Launcher command construction
+is covered by unit tests in the platform repo. After logging in, run a small task through Datacore
+and check that it returns a result and reaches its terminal task state.
 
 ## Three things gate dispatch, whichever CLI
 

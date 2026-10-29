@@ -2,6 +2,11 @@
 
 For maintainers. Users need nothing in this file.
 
+Changing a helper in this checkout does not update an existing release asset. Stage and publish a
+new release for the worker-choice and preflight fixes; do not claim the pinned release includes
+them until its published assets actually carry them. The runtime bundle may retain its own
+version when only installer helpers change.
+
 ## Why it is a script
 
 `v0.1.79` was assembled by hand and shipped 7 of the 9 files it needed. `lib/project.sh` and
@@ -26,7 +31,7 @@ So the asset set is not written down twice. `make-release.sh` derives it from `i
 Build both architectures first. A release with one architecture 404s for everyone on the other.
 
 ```bash
-sh make-release.sh v0.1.81 /path/to/bundle/latest/download
+sh make-release.sh v0.1.82 /path/to/bundle/latest/download
 ```
 
 It stages into `dist/<version>/`, writes `SHA256SUMS`, verifies its own output, and prints the
@@ -40,16 +45,21 @@ upload commands. It refuses to:
 It does not upload and does not publish. Both are deliberate.
 
 ```bash
-gh release upload v0.1.81 --repo <owner>/datacore-install dist/v0.1.79/* --clobber
-gh release edit   v0.1.81 --repo <owner>/datacore-install --draft=false
+gh release upload v0.1.82 --repo <owner>/datacore-install dist/v0.1.82/* --clobber
+gh api repos/<owner>/datacore-install/releases/tags/v0.1.82 --jq '.assets[] | [.name, .state] | @tsv'
+gh release edit   v0.1.82 --repo <owner>/datacore-install --draft=false --latest
 ```
+
+Before publishing, every staged asset must be present and have state `uploaded`. A failed upload
+entry is not an attached file; retry it before making the release public.
 
 ## The last step is the one that is easy to forget
 
-`--draft=false`. Until then the tag is not pushed, and the first command in the README —
+`--draft=false` publishes the release; `--latest` also makes the update command find it. Until
+publication the tagged installer —
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.81/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.82/install.sh
 ```
 
 — returns `404`. A draft release is fully visible to you and invisible to everyone else, which is
@@ -59,7 +69,8 @@ Verify after publishing:
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' \
-  https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.81/install.sh      # expect 200
+  https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.82/install.sh      # expect 200
+gh api repos/<owner>/datacore-install/releases/latest --jq .tag_name               # expect v0.1.82
 ```
 
 CI covers all of this in two jobs: *the pinned release is stated the same way everywhere* checks the

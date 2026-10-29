@@ -248,7 +248,7 @@ registry_tool() {
 // `enable` takes tokens from, and leaves the registry holding only what was asked for.
 const { readFileSync, writeFileSync, existsSync, chmodSync, readdirSync, statSync, realpathSync } = require("fs");
 const { spawnSync } = require("child_process");
-const { mkdirSync } = require("fs");
+const { mkdirSync, renameSync, unlinkSync } = require("fs");
 const { dirname, join } = require("path");
 
 const [cmd, registryPath, cataloguePath, configPath, ...rest] = process.argv.slice(2);
@@ -277,11 +277,12 @@ const MIRRORS = (process.env.DC_REGISTRY_MIRRORS || "")
 // the bundle but the bundle's own installer regenerates it, so by the time prune runs it no longer
 // says what the user had chosen -- measured on a real 0.1.79 -> 0.1.80 upgrade.
 //
-// This file is the one carrier nothing else writes: a path under $DATACORE_HOME that no part of
-// the bundle knows about. It holds two different things, kept apart on purpose:
+// This file lives outside the bundle and keeps intent separate from provisioned identities:
 //
-//   chosen      the families the user enabled -- evidence of a CHOICE, and it shrinks on removal
-//   identities  provisioned workers and their tokens -- evidence an IDENTITY exists, nothing more
+//   chosen      families the user enabled
+//   disabled    families the user removed, including defaults
+//   selected    exact model choices, when the user supplied an alias
+//   identities  provisioned workers and their tokens, independent of intent
 //
 // Conflating them is the bug in both directions. Reading choices from a list of identities
 // enables every family whose CLI happens to be installed; losing the identities means a worker
@@ -292,9 +293,18 @@ function readState() {
   if (!STATE_PATH || !existsSync(STATE_PATH)) return null;
   try {
     const doc = read(STATE_PATH);
-    return doc && Array.isArray(doc.chosen) ? doc : null;
-  } catch {
-    return null;                      // Corrupt state must not stop an install; migrate instead.
+    if (!doc || !Array.isArray(doc.chosen) || doc.chosen.some((f) => typeof f !== "string") ||
+        (doc.disabled !== undefined && (!Array.isArray(doc.disabled) || doc.disabled.some((f) => typeof f !== "string"))) ||
+        (doc.identities !== undefined && !Array.isArray(doc.identities)) ||
+        (doc.selected !== undefined && (!doc.selected || Array.isArray(doc.selected) || typeof doc.selected !== "object" ||
+          Object.values(doc.selected).some((id) => typeof id !== "string")))) {
+      throw new Error("invalid choices format");
+    }
+    return doc;
+  } catch (err) {
+    const reason = err.code || "invalid choices format";
+    die(`Cannot read worker choices at ${STATE_PATH}: ${reason}.\n` +
+        "The file was left unchanged. Restore a valid copy before changing workers; older registries will not override it.");
   }
 }
 
@@ -314,21 +324,33 @@ function writeState(opts) {
   const chosen = [...new Set([...((prev && prev.chosen) || []), ...((opts && opts.choose) || [])])]
     .filter((f) => !dropped.has(f))
     .sort();
+  const enabled = new Set((opts && opts.choose) || []);
+  const disabled = [...new Set([...((prev && prev.disabled) || []), ...dropped])]
+    .filter((f) => !enabled.has(f)).sort();
+  // Model pins and disabled families are optional in v1 state.
+  const selected = { ...((prev && prev.selected) || {}) };
+  for (const fam of [...dropped, ...((opts && opts.choose) || [])]) delete selected[fam];
+  Object.assign(selected, (opts && opts.selected) || {});
   const identities = (catalogue.workers || []).filter((w) => !isInfra(w));
+  const tmp = `${STATE_PATH}.tmp.${process.pid}`;
   try {
     mkdirSync(dirname(STATE_PATH), { recursive: true });
-    write(STATE_PATH, { version: 1, chosen, identities });
-  } catch {
-    // Non-fatal. A failed write means the next upgrade falls back to migrating from the previous
-    // version directory, which is worse but not broken.
+    writeFileSync(tmp, JSON.stringify({ version: 1, chosen, disabled, selected, identities }, null, 2) + "\n",
+                  { encoding: "utf8", mode: 0o600, flag: "wx" });
+    renameSync(tmp, STATE_PATH);
+  } catch (err) {
+    try { unlinkSync(tmp); } catch {}
+    die(`Could not save worker choices at ${STATE_PATH}: ${err.message}.\n` +
+        "Worker registry was not changed. Check that the choices directory is writable and try again.");
   }
 }
 
 function writeRegistry(doc, opts) {
+  // Save intent first. Never advertise a registry change that the next prune would undo.
+  writeState(opts);
   write(registryPath, doc);
   for (const p of MIRRORS) write(p, doc);
   writeExecutors(doc);
-  writeState(opts);
 }
 
 // ---- executor profiles --------------------------------------------------------------------------
@@ -499,7 +521,8 @@ function families(path) {
     arrays.set(m[1], m[2].split(",").map((x) => x.replace(/^"|"$/g, "")).filter(Boolean));
   }
   for (const m of s.matchAll(/agentFamily:"([^"]+)"/g)) {
-    const seg = s.slice(m.index, m.index + 2000);
+    const next = s.indexOf('agentFamily:"', m.index + m[0].length);
+    const seg = s.slice(m.index, next < 0 ? m.index + 2000 : Math.min(next, m.index + 2000));
     const pick = (re) => (seg.match(re) || [])[1];
     const aliasRef = pick(/modelAliases:(\w+)/);
     const phaseList = (seg.match(/phases:\[([^\]]*)\]/) || [])[1];
@@ -528,7 +551,7 @@ function unprovisioned(fams, catalogue) {
 
 // Pick one entry per family: the family's default alias when the catalogue names one and that
 // alias exists, else the first entry the bundle listed for the family.
-function onePerFamily(workers, fams, wantCli) {
+function onePerFamily(workers, fams, wantCli, selected = {}) {
   const chosen = [];
   const seen = new Set();
   for (const w of workers) {
@@ -536,8 +559,9 @@ function onePerFamily(workers, fams, wantCli) {
     if (seen.has(fam)) continue;
     const meta = fams.get(fam) || {};
     if (wantCli && !wantCli(w, meta, fam)) continue;
+    const pinned = selected[fam] && workers.find((x) => x.agent_id === selected[fam]);
     const want = meta.defaultAlias;
-    const pick = (want && workers.find((x) => familyOf(x) === fam && x.model_alias === want)) || w;
+    const pick = pinned || (want && workers.find((x) => familyOf(x) === fam && x.model_alias === want)) || w;
     seen.add(fam);
     chosen.push(pick);
   }
@@ -555,6 +579,8 @@ if (!existsSync(registryPath)) die(`no worker registry at ${registryPath}`);
 
 const registry = read(registryPath);
 registry.workers = registry.workers || [];
+// An existing choices file is authoritative, even when damaged: never silently re-migrate it.
+readState();
 
 // Where the previous install's worker state can still be read from. Two kinds, deliberately kept
 // apart: a *registry* lists the workers that were enabled, so it is evidence of a choice; a
@@ -606,7 +632,8 @@ let catalogue = existsSync(cataloguePath) ? read(cataloguePath) : { ...registry,
 catalogue.workers = catalogue.workers || [];
 {
   const byId = new Map(catalogue.workers.map((w) => [w.agent_id, w]));
-  for (const w of registry.workers) if (!byId.has(w.agent_id)) byId.set(w.agent_id, w);
+  // Current registry entries carry the bundle's latest tokens; the catalogue retains other IDs.
+  for (const w of registry.workers) byId.set(w.agent_id, w);
 
   // And whatever the previous install had. Both the registry and the catalogue live in
   // $ROOT/current/generated, which belongs to the *versioned* bundle directory, so an upgrade
@@ -789,12 +816,13 @@ if (cmd === "prune") {
     return meta ? !meta.inDefault : true;
   });
 
+  const disabled = new Set((state && state.disabled) || []);
   const keep = onePerFamily(catalogue.workers, fams, (w, meta, fam) => {
-    if (isInfra(w)) return false;
+    if (isInfra(w) || disabled.has(fam)) return false;
     // The default profile, or an explicit choice. A choice outranks the default: the user asked.
     if (!meta.inDefault && !chosen.has(fam)) return false;
     return present.has(meta.cli || w.cli);          // and the CLI has to actually be installed
-  });
+  }, (state && state.selected) || {});
   registry.workers = [...catalogue.workers.filter(isInfra), ...keep];
   writeRegistry(registry, { choose: migrated });
   const n = summarise(registry.workers);
@@ -829,66 +857,65 @@ if (cmd === "enable" || cmd === "disable") {
     const before = registry.workers.length;
     // Taken before the filter: these are the families to forget, the only ones a choices-file
     // write is allowed to drop.
-    const forget = [...new Set(registry.workers
+    const state = readState();
+    const chosen = new Set((state && state.chosen) || []);
+    const saved = onePerFamily(catalogue.workers, fams,
+      (w, meta, fam) => chosen.has(fam) || meta.inDefault, (state && state.selected) || {});
+    const removable = [...registry.workers, ...saved];
+    const forget = [...new Set(removable
       .filter((w) => !isInfra(w) && matches(w))
       .map((w) => String(w.agent_id || "").split("@")[0])
       .filter(Boolean))];
     registry.workers = registry.workers.filter((w) => isInfra(w) || !matches(w));
-    if (registry.workers.length === before) die(`Nothing enabled matches '${sel}'. Run: datacore worker list`);
+    if (registry.workers.length === before && !forget.length) die(`Nothing enabled matches '${sel}'. Run: datacore worker list`);
     writeRegistry(registry, { forget });
-    console.log(`  removed ${before - registry.workers.length} worker(s)`);
+    console.log(`  disabled ${forget.length} worker family/families (${before - registry.workers.length} worker(s) were enabled)`);
     summarise(registry.workers);
     process.exit(0);
   }
 
-  const pool = catalogue.workers.filter((w) => !isInfra(w) && matches(w) && w.token);
-  if (!pool.length) {
-    // Distinguish "the bundle has never heard of this" from "the bundle knows it but this install
-    // has no token for it". The second is the common case for a family outside the default profile,
-    // and it has a specific remedy, so saying "no worker matches" would be actively misleading.
-    const known = [...fams].filter(([fam, meta]) => fam === selName || meta.cli === selName);
-    if (known.length) {
-      const aliasNote = known
-        .map(([fam, meta]) => `${fam} (${meta.aliases.join(", ") || "no models listed"})`)
-        .join("\n    ");
-      // No token for this family, because the install provisions the default profile only. Mint
-      // one rather than sending the user back through the installer: a credential per worker is
-      // what the installer would have done, and doing it here provisions exactly the one asked
-      // for instead of all 29.
-      const run = BUNDLE_DIR ? composeRunner() : null;
-      if (!run) {
-        die(
-          `'${sel}' is a worker Datacore knows, but this install has no credential for it,\n` +
-            `  and the Runtime is not reachable to mint one (no docker compose on PATH).\n\n` +
-            `  Start the stack and try again:  datacore start\n\n  Matched:\n    ${aliasNote}`,
-        );
-      }
-      let made;
-      try {
-        made = provisionEntries(run, known, selAlias);
-      } catch (err) {
-        die(
-          `Could not provision '${sel}': ${err instanceof Error ? err.message : String(err)}\n\n` +
-            `  The Runtime has to be running to mint a worker credential. Check: datacore status\n` +
-            `  If it is running, the installer can still provision every catalogued model:\n\n` +
-            `    DATACORE_LOCAL_FULL_WORKER_REGISTRY=1 datacore update\n\n  Matched:\n    ${aliasNote}`,
-        );
-      }
-      // Keep the new credentials in the catalogue too, so removing and re-adding the worker later
-      // does not mint a second one — the catalogue is where `add` takes tokens from.
-      const catalogueHave = new Set(catalogue.workers.map((w) => w.agent_id));
-      catalogue.workers = [...catalogue.workers, ...made.filter((w) => !catalogueHave.has(w.agent_id))];
-      write(cataloguePath, catalogue);
-      const registryHave = new Set(registry.workers.map((w) => w.agent_id));
-      const fresh = made.filter((w) => !registryHave.has(w.agent_id));
-      registry.workers = [...registry.workers, ...fresh];
-      writeRegistry(registry);
-      console.log(`  provisioned ${made.length} credential(s) and enabled ${fresh.length} worker(s)`);
-      summarise(registry.workers);
-      process.exit(0);
+  const known = [...fams].filter(([fam, meta]) =>
+    fam === selName || meta.cli === selName || CLI_BIN[meta.cli] === selName);
+  // Reject the whole request before minting anything if an exact alias is unknown.
+  for (const [fam, meta] of known) {
+    if (selAlias && !meta.aliases.includes(selAlias)) {
+      die(`${fam} has no model '${selAlias}'. It lists: ${meta.aliases.join(", ")}`);
     }
-    // List the CLI names too. Listing families only sent a user who typed a CLI name away with a
-    // list that did not contain the thing they should have typed instead.
+  }
+  const pool = catalogue.workers.filter((w) => !isInfra(w) && matches(w) && w.token);
+  const missing = known.filter(([fam]) => !pool.some((w) => familyOf(w) === fam));
+  let made = [];
+  if (missing.length) {
+    // Provision only the requested families that lack credentials. A CLI request may include
+    // both an existing implementation worker and a reviewer that has never been provisioned.
+    const aliasNote = missing
+      .map(([fam, meta]) => `${fam} (${meta.aliases.join(", ") || "no models listed"})`)
+      .join("\n    ");
+    const run = BUNDLE_DIR ? composeRunner() : null;
+    if (!run) {
+      die(
+        `'${sel}' is a worker Datacore knows, but this install has no credential for it,\n` +
+          `  and the Runtime is not reachable to mint one (no docker compose on PATH).\n\n` +
+          `  Start the stack and try again:  datacore start\n\n  Matched:\n    ${aliasNote}`,
+      );
+    }
+    try {
+      made = provisionEntries(run, missing, selAlias);
+    } catch (err) {
+      die(
+        `Could not provision '${sel}': ${err instanceof Error ? err.message : String(err)}\n\n` +
+          `  The Runtime has to be running to mint a worker credential. Check: datacore status\n` +
+          `  Start it and retry: datacore start\n\n  Matched:\n    ${aliasNote}`,
+      );
+    }
+    // Retain the identities even if a later choice write fails, so retrying does not mint again.
+    const byId = new Map(catalogue.workers.map((w) => [w.agent_id, w]));
+    for (const w of made) byId.set(w.agent_id, w);
+    catalogue.workers = [...byId.values()];
+    write(cataloguePath, catalogue);
+    pool.push(...made);
+  }
+  if (!pool.length) {
     const live = catalogue.workers.filter((w) => !isInfra(w));
     const names = [...new Set(live.map((w) => familyOf(w)))];
     const clis = [...new Set(live.flatMap((w) => {
@@ -912,14 +939,17 @@ if (cmd === "enable" || cmd === "disable") {
   // `worker add` on it reports "already enabled" and returns -- so without this the explicit ask
   // would never reach the file, and the next upgrade would treat it as a default-profile accident.
   const choose = [...new Set(add.map((w) => String(w.agent_id || "").split("@")[0]).filter(Boolean))];
-  if (!fresh.length) {
-    writeState({ choose });
+  const selected = selAlias ? Object.fromEntries(add.map((w) => [familyOf(w), w.agent_id])) : {};
+  const replacing = registry.workers.some((w) => choose.includes(familyOf(w)) && !add.some((x) => x.agent_id === w.agent_id));
+  if (!fresh.length && !replacing && !made.length) {
+    writeState({ choose, selected });
     console.log(`  already enabled: ${add.map((w) => w.agent_id).join(", ")}`);
     process.exit(0);
   }
-  registry.workers = [...registry.workers, ...fresh];
-  writeRegistry(registry, { choose });
-  console.log(`  enabled ${fresh.length} worker(s)`);
+  // One selected model per family, whether the user asks for an alias or the family default.
+  registry.workers = [...registry.workers.filter((w) => !choose.includes(familyOf(w))), ...add];
+  writeRegistry(registry, { choose, selected });
+  console.log(`  ${made.length ? `provisioned ${made.length} credential(s) and ` : ""}enabled ${fresh.length} worker(s)`);
   summarise(registry.workers);
   process.exit(0);
 }
@@ -930,11 +960,8 @@ DATACORE_REGISTRY_JS
   # it takes zero. Positional "$2" "$3" "$4" would trip `set -u` in exactly that case.
   _cmd="$1"; shift
   _rc=0
-  # The mirror under $DATA_HOME is the only copy of the *enabled* set that survives an
-  # upgrade: $ROOT/current is a symlink to a versioned bundle dir, so generated/ (and the
-  # registry in it) is newly minted by every install. `prune` needs it to tell a worker the
-  # user chose from one the bundle merely minted. Passed by environment because `prune` is
-  # variadic over installed CLIs, so a fifth positional would be read as a CLI name.
+  # Choices live outside the bundle; old registries are migration input only when no choices
+  # file exists. Pass paths by environment because prune's remaining arguments name CLIs.
   DATACORE_WORKER_STATE="$WORKER_STATE" \
   DATACORE_WORKER_PRIOR_REGISTRY="$RUNTIME_REGISTRY" \
   DATACORE_WORKER_VERSIONS_DIR="$ROOT/versions" \
@@ -1046,16 +1073,18 @@ Subcommands:
                    or one exact worker (codex-review@gpt-6-luna).
                    With no name, show what is enabled and what is available.
   list             show the workers the runtime will dispatch to
-  remove <name>    disable a worker
-  prune            reset to the lean default — one worker per default-profile
-                   family, for the worker CLIs installed on this machine
+  remove <name>    disable a worker, including a saved choice whose CLI is absent
+  prune            refresh the lean default plus your explicit choices, preserving
+                   selected models; only installed CLIs are enabled
   sync             regenerate the Coordinator's executor profiles from the
                    registry. The installer runs this for you; run it yourself
                    if `datacore doctor` reports executor_config:file_present
 
-The bundle mints a token for every CLI x model x role combination it knows (29 of them). They are
-kept in a catalogue beside the registry; these subcommands move workers between the two, so
-enabling one never needs new credentials and disabling one never destroys any.
+The catalogue keeps provisioned identities, so disabling a worker does not destroy its credential.
+Enabling a worker not provisioned yet asks the running Runtime for its credential.
+An exact model selection replaces that family's model and survives prune and upgrades.
+Remove stays removed across prune and upgrades, including default-profile workers.
+Add the family again to enable it; a temporarily missing CLI does not change your choices.
 
 Datacore stores no credential for a worker CLI — it uses your own login for that tool. A model API
 provider (datacore provider add) is the other kind, and there Datacore does hold the key.

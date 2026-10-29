@@ -110,13 +110,13 @@ echo
 echo "To publish (this script deliberately does not):"
 echo
 echo "  gh release create $VERSION --repo <owner>/datacore-install \\"
-echo "    --title '$VERSION' --notes-file <notes.md> \\"
+echo "    --title '$VERSION' --notes-file <notes.md> --latest \\"
 echo "    dist/$VERSION/*"
 echo
 echo "For a release that already exists as a draft:"
 echo
 echo "  gh release upload $VERSION --repo <owner>/datacore-install dist/$VERSION/* --clobber"
-echo "  gh release edit   $VERSION --repo <owner>/datacore-install --draft=false"
+echo "  gh release edit   $VERSION --repo <owner>/datacore-install --draft=false --latest"
 echo
 echo "A draft release keeps its tag unpushed, so"
 echo "  curl -fsSL https://raw.githubusercontent.com/<owner>/datacore-install/$VERSION/install.sh"

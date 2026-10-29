@@ -8,20 +8,23 @@ This repository holds the installer and documentation. **It contains no Datacore
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.82/install.sh | sh
+curl -fsSLO https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.82/install.sh &&
+sh install.sh
 ```
 
-The URL names a release on purpose. Fetching the installer from `main` would mean the script and
-the bundle it downloads could both change under you, so the same command would install different
-software on different days. Installing from a tag is reproducible: that command does the same thing
-next month as it does today. To track the newest release instead, set `DATACORE_VERSION=latest`.
+Downloading first lets the installer ask you to accept the licence in your terminal. You can
+inspect it with `less install.sh` before running it.
 
-Prefer to read before you run? That is the better habit:
+The URL pins the Datacore installer and payload release. Docker, an existing Bun installation and
+other host tools are prerequisites outside that pin. To track the newest Datacore release instead,
+set `DATACORE_VERSION=latest` when running the installer.
+
+For unattended installation, read the [licence terms](EULA.md) first. If you accept them, set the
+acceptance explicitly before piping the installer:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.82/install.sh
-less install.sh
-sh install.sh
+export DATACORE_ACCEPT_EULA=1
+curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.82/install.sh | sh
 ```
 
 ## What you need first
@@ -151,7 +154,11 @@ reuses the installed bundle and registers every AI client it now finds:
 curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.82/install.sh | sh
 ```
 
-Then restart the client and ask it *"what tasks do I have?"*. If it answers, the loop is closed.
+Then restart the client and ask it *"what tasks do I have?"*. If it answers, the client connection
+works. Complete one small task to verify worker dispatch and its result.
+
+`datacore report` combines the configuration checks and the next command for any blocked check.
+Its `ready` verdict is a preflight result: it does not test model login or run a task.
 
 If something still does not dispatch, the three gates in [Workers](#workers) are the things to
 check, in that order — and all three fail quietly, which is why they are listed there explicitly.
@@ -202,8 +209,12 @@ datacore worker list                       # what will be dispatched to
 datacore worker add codex                  # enable a CLI (one worker, one reviewer)
 datacore worker add codex-review@gpt-6-sol # or one exact model
 datacore worker remove agy                 # disable
-datacore worker prune                      # back to the lean default
+datacore worker prune                      # refresh available workers; keep your choices
 ```
+
+Your enabled and disabled families, including an exact model selection, are kept across prune and
+upgrades. A temporarily missing CLI makes its workers unavailable without forgetting the choice.
+`worker remove` clears that choice even while the CLI is unavailable; `worker add` enables it again.
 
 ```bash
 datacore worker sync                       # regenerate executor profiles from the registry

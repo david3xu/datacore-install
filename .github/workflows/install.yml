@@ -15,15 +15,25 @@ name: install
 on:
   push:
     branches: [main]
-    paths: ['install.sh', 'datacore', 'lib/**', '.github/workflows/install.yml']
+    paths: ['install.sh', 'datacore', 'lib/**', 'test/**', '.github/workflows/install.yml']
   pull_request:
-    paths: ['install.sh', 'datacore', 'lib/**', '.github/workflows/install.yml']
+    paths: ['install.sh', 'datacore', 'lib/**', 'test/**', '.github/workflows/install.yml']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  install-flow:
+    name: fast source regressions
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          set -eu
+          command -v node >/dev/null
+          for test_file in test/*.test.py; do python3 "$test_file"; done
+
   source:
     # Both architectures, because the release ships an archive for each and the installer picks by
     # platform. The arm64 archive had never been installed by anything before this job existed.
@@ -213,10 +223,11 @@ jobs:
       - name: doctor reports nothing blocking
         run: |
           set -eu
-          # A pipe into `tail` would hide doctor's exit code and make this step decorative, so
-          # capture the report and judge it. A missing worker CLI is expected on a runner and is
-          # not blocking; anything else is.
-          ~/.datacore/bin/datacore doctor > doctor.log 2>&1 || true
+          # Check the complete report and its exit status. Missing optional launchers are allowed.
+          doctor_status=0
+          ~/.datacore/bin/datacore doctor > doctor.log 2>&1 || doctor_status=$?
+          eval "$(sed -n '/^doctor_report_ok() {$/,/^}$/p' install.sh)"
+          doctor_report_ok doctor.log "$doctor_status" 1 || { cat doctor.log; echo "::error::doctor did not finish with a complete, healthy report (exit $doctor_status)"; exit 1; }
           tail -3 doctor.log
           blocking=$(grep ' FAIL ' doctor.log | grep -v 'bridge_dispatch:launcher:' || true)
           if [ -n "$blocking" ]; then
@@ -315,7 +326,7 @@ jobs:
           if [ "$pinned" = "$latest" ]; then
             echo "both install routes serve the same release"
           else
-            echo "::warning::\`latest\` serves $latest while install.sh pins $pinned, so DATACORE_VERSION=latest and the repo's Latest-release link hand out different software than the README one-liner. Fix: gh release edit $pinned --prerelease=false"
+            echo "::warning::\`latest\` serves $latest while install.sh pins $pinned, so DATACORE_VERSION=latest and the repo's Latest-release link hand out different software than the README one-liner. Fix: gh release edit $pinned --latest"
           fi
 
       - name: the documented one-liner is actually reachable
@@ -463,7 +474,10 @@ jobs:
         run: |
           set -eu
           test -f ~/stub/entry.txt
-          ~/.datacore/bin/datacore doctor > doctor.log 2>&1 || true
+          doctor_status=0
+          ~/.datacore/bin/datacore doctor > doctor.log 2>&1 || doctor_status=$?
+          eval "$(sed -n '/^doctor_report_ok() {$/,/^}$/p' install.sh)"
+          doctor_report_ok doctor.log "$doctor_status" 1 || { cat doctor.log; echo "::error::doctor did not finish with a complete, healthy report (exit $doctor_status)"; exit 1; }
           tail -3 doctor.log
           blocking=$(grep ' FAIL ' doctor.log | grep -v 'bridge_dispatch:launcher:' || true)
           [ -z "$blocking" ] || { printf '%s\n' "$blocking"; exit 1; }
@@ -1141,7 +1155,10 @@ jobs:
       - name: A clean machine reports no failures, and skips the launchers
         run: |
           set -eu
-          ~/.datacore/bin/datacore doctor > doctor.log 2>&1 || true
+          doctor_status=0
+          ~/.datacore/bin/datacore doctor > doctor.log 2>&1 || doctor_status=$?
+          eval "$(sed -n '/^doctor_report_ok() {$/,/^}$/p' install.sh)"
+          doctor_report_ok doctor.log "$doctor_status" 1 || { cat doctor.log; echo "::error::doctor did not finish with a complete, healthy report (exit $doctor_status)"; exit 1; }
           tail -1 doctor.log
 
           # Unanchored like the other doctor checks here: the status line carries a leading glyph,
@@ -1188,24 +1205,8 @@ jobs:
           chmod +x ~/bin/claude
           export PATH="$HOME/bin:$PATH"
 
-          # The walkthrough promises this one command is enough: no reinstall, no `worker sync`.
-          #
-          # install.sh comes from main but lib/*.sh come from the release, so this job can run new
-          # installer logic against an old helper -- the same situation the worker-trim step in the
-          # published job reports rather than fails on, because the fix is cutting a release, not
-          # reverting. A release whose lib/worker.sh predates the CLI-name selector rejects
-          # `claude`; the step still has to exercise steps 4 and 5, so it says so and falls back to
-          # the family name. The static drift check at the top of this job is what guards the fix
-          # itself, and it runs against the checkout.
-          if ! ~/.datacore/bin/datacore worker add claude; then
-            if grep -q 'CLI_BIN' lib/worker.sh; then
-              echo "::warning::the published lib/worker.sh predates the CLI-name selector, so 'worker add claude' is rejected on the released helper — cut a release carrying the current lib/worker.sh"
-              ~/.datacore/bin/datacore worker add claude-worker
-            else
-              echo "::error::'datacore worker add claude' failed and the checkout has no CLI_BIN map either, so the README's step 4 is simply wrong"
-              exit 1
-            fi
-          fi
+          # Assert the documented command directly; a fallback would repair the state under test.
+          ~/.datacore/bin/datacore worker add claude
           ~/.datacore/bin/datacore worker list
 
           n=$(python3 -c "
@@ -1215,7 +1216,10 @@ jobs:
           echo "dispatchable workers: $n"
           test "$n" -ge 1 || { echo "::error::worker add enabled nothing, so the walkthrough's step 4 is wrong"; exit 1; }
 
-          ~/.datacore/bin/datacore doctor > doctor2.log 2>&1 || true
+          doctor_status=0
+          ~/.datacore/bin/datacore doctor > doctor2.log 2>&1 || doctor_status=$?
+          eval "$(sed -n '/^doctor_report_ok() {$/,/^}$/p' install.sh)"
+          doctor_report_ok doctor2.log "$doctor_status" 1 || { cat doctor2.log; echo "::error::doctor did not finish with a complete, healthy report (exit $doctor_status)"; exit 1; }
           tail -1 doctor2.log
 
           # The README's step 4 promises this exact transition, so assert the transition and not
@@ -1259,7 +1263,7 @@ jobs:
           ~/.datacore/bin/datacore report > report.log 2>&1 || { cat report.log; echo "::error::datacore report exited non-zero on an install where every gate passes"; exit 1; }
           cat report.log
           grep -q 'Verdict:' report.log || { echo "::error::report printed no verdict"; exit 1; }
-          grep -q 'Verdict: ready' report.log || echo "::warning::report ran but did not say ready; the gates above should all pass here"
+          grep -q 'Verdict: ready' report.log || { echo "::error::report did not say ready although the preflight gates above pass"; exit 1; }
 
           html=$(sed -n 's/^Wrote //p' report.log | head -1)
           test -n "$html" || { echo "::error::report did not say where it wrote the page"; exit 1; }
@@ -1292,7 +1296,7 @@ jobs:
           PYCHK
 
   meta-worker:
-    name: a new user can dispatch to a Meta model
+    name: a Muse worker keeps its configuration and launcher checks
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -1478,7 +1482,10 @@ jobs:
         if: env.MUSE_IN_BUNDLE == '1'
         run: |
           set -eu
-          ~/.datacore/bin/datacore doctor > d1.log 2>&1 || true
+          doctor_status=0
+          ~/.datacore/bin/datacore doctor > d1.log 2>&1 || doctor_status=$?
+          eval "$(sed -n '/^doctor_report_ok() {$/,/^}$/p' install.sh)"
+          doctor_report_ok d1.log "$doctor_status" 1 || { cat d1.log; echo "::error::doctor did not finish with a complete, healthy report (exit $doctor_status)"; exit 1; }
           grep -qE ' SKIP +bridge_dispatch:launcher:muse' d1.log || {
             echo "::error::a machine with no muse worker and no muse binary must skip the check, not fail it"
             grep -i muse d1.log || echo "(the check was not emitted at all)"
@@ -1529,7 +1536,10 @@ jobs:
         if: env.MUSE_IN_BUNDLE == '1'
         run: |
           set -eu
-          ~/.datacore/bin/datacore doctor > d2.log 2>&1 || true
+          doctor_status=0
+          ~/.datacore/bin/datacore doctor > d2.log 2>&1 || doctor_status=$?
+          eval "$(sed -n '/^doctor_report_ok() {$/,/^}$/p' install.sh)"
+          doctor_report_ok d2.log "$doctor_status" 1 || { cat d2.log; echo "::error::doctor did not finish with a complete, healthy report (exit $doctor_status)"; exit 1; }
           grep -qE ' FAIL +bridge_dispatch:launcher:muse' d2.log || {
             echo "::error::a muse worker is enabled and muse is absent; that must fail loudly, or green stops meaning 'can work'"
             grep -i muse d2.log || echo "(the check was not emitted at all)"
@@ -1538,11 +1548,8 @@ jobs:
           grep -A2 -E ' FAIL +bridge_dispatch:launcher:muse' d2.log | head -3
           echo "failed with its remediation, which is what a user needs to see here"
 
-      # A stub is enough and is the only honest option: a real `muse` needs `muse login` against a
-      # Meta account, and no credential belongs in public CI. So this proves the bridge resolves
-      # and executes the binary it was told to -- not that a Meta model answered. The argv the
-      # launcher builds is covered by unit tests in the platform repo; what cannot be proven
-      # without a secret is left unproven rather than faked.
+      # Doctor checks executable presence, without launching a model. This stub covers that
+      # transition only. A real task/model round trip needs a separately authenticated proof.
       - name: Installing the CLI turns the check OK, and nothing else breaks
         if: env.MUSE_IN_BUNDLE == '1'
         run: |
@@ -1552,7 +1559,10 @@ jobs:
           chmod +x ~/bin/muse
           export PATH="$HOME/bin:$PATH"
 
-          ~/.datacore/bin/datacore doctor > d3.log 2>&1 || true
+          doctor_status=0
+          ~/.datacore/bin/datacore doctor > d3.log 2>&1 || doctor_status=$?
+          eval "$(sed -n '/^doctor_report_ok() {$/,/^}$/p' install.sh)"
+          doctor_report_ok d3.log "$doctor_status" 1 || { cat d3.log; echo "::error::doctor did not finish with a complete, healthy report (exit $doctor_status)"; exit 1; }
           tail -1 d3.log
           grep -qE ' OK +bridge_dispatch:launcher:muse' d3.log || {
             echo "::error::muse is on PATH and a muse worker is enabled; the check must be OK"
@@ -1776,7 +1786,10 @@ jobs:
       - name: And the upgraded install is healthy
         run: |
           set -eu
-          ~/.datacore/bin/datacore doctor > d.log 2>&1 || true
+          doctor_status=0
+          ~/.datacore/bin/datacore doctor > d.log 2>&1 || doctor_status=$?
+          eval "$(sed -n '/^doctor_report_ok() {$/,/^}$/p' install.sh)"
+          doctor_report_ok d.log "$doctor_status" 1 || { cat d.log; echo "::error::doctor did not finish with a complete, healthy report (exit $doctor_status)"; exit 1; }
           tail -1 d.log
           fails=$(grep ' FAIL ' d.log | sed -E 's/.* FAIL ([A-Za-z0-9_:.-]+).*/\1/' | grep -E '^[a-z_]+:' | sort -u || true)
           if [ -n "$fails" ]; then

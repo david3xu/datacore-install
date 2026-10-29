@@ -659,9 +659,6 @@ runtime_port_diagnosis() {
   printf '    then: %s/datacore start\n' "$BIN_DIR"
 }
 
-# Checks that only describe an unconfigured optional worker CLI. Everything else is blocking.
-WORKER_LAUNCHER_CHECK='^bridge_dispatch:launcher:'
-
 # ---------------------------------------------------------------- 5b. trim the worker registry
 #
 # The bundle writes its worker registry as the full cartesian product of worker CLI x model alias x
@@ -676,14 +673,11 @@ WORKER_LAUNCHER_CHECK='^bridge_dispatch:launcher:'
 lean_workers() {
   _w="$BIN_DIR/lib/worker.sh"
   if [ ! -f "$_w" ]; then
-    info "worker registry left as generated — this release does not carry lib/worker.sh"
-    return 0
+    die "The worker helper is missing at $_w. Re-run the installer to restore it."
   fi
-  # An older lib/worker.sh has no `prune` verb. Losing the trim is cosmetic, so report and move on
-  # rather than fail an install whose runtime is already up and healthy.
-  if ! _out=$(DATACORE_INSTALL_ROOT="$INSTALL_ROOT" DATACORE_HOME="$DATA_HOME" sh "$_w" prune 2>/dev/null); then
-    info "worker registry left as generated (trim it with: datacore worker prune)"
-    return 0
+  if ! _out=$(DATACORE_INSTALL_ROOT="$INSTALL_ROOT" DATACORE_HOME="$DATA_HOME" sh "$_w" prune 2>&1); then
+    die "Could not apply your worker choices. The install is not ready." "$_out" \
+      "Fix the reported problem, then run the installer again."
   fi
   printf '%s\n' "$_out"
   # Executor profiles are what the Coordinator dispatches from, and they used to be written only
@@ -691,31 +685,60 @@ lean_workers() {
   # from the bundle's generator produced none, so the Coordinator silently fell back to the
   # example list in the image and workers outside it were undispatchable. Sync unconditionally:
   # it is idempotent, and it makes the profiles agree with the registry however the registry
-  # was produced. An older helper has no `sync` verb, so a failure here is reported, not fatal.
-  if ! DATACORE_INSTALL_ROOT="$INSTALL_ROOT" DATACORE_HOME="$DATA_HOME" sh "$_w" sync >/dev/null 2>&1; then
-    info "executor profiles not synced (this release's lib/worker.sh has no 'sync')"
+  # was produced. A failure must stop the install: unsynced profiles may route to other workers.
+  if ! _sync=$(DATACORE_INSTALL_ROOT="$INSTALL_ROOT" DATACORE_HOME="$DATA_HOME" sh "$_w" sync 2>&1); then
+    die "Could not sync the worker configuration. The install is not ready." "$_sync" \
+      "Fix the reported problem, then run the installer again."
   fi
+  [ -z "$_sync" ] || printf '%s\n' "$_sync"
   _n=$(printf '%s\n' "$_out" | sed -n 's/^  \([0-9]\{1,\}\) worker(s) enabled.*/\1/p' | tail -1)
   if [ "${_n:-0}" = 0 ]; then
-    WORKERS_SUMMARY="none — no worker CLI installed (claude, codex, agy, muse)"
+    if command -v claude >/dev/null 2>&1 || command -v codex >/dev/null 2>&1 \
+       || command -v agy >/dev/null 2>&1 || command -v muse >/dev/null 2>&1; then
+      WORKERS_SUMMARY="none enabled — run: datacore worker add <name>"
+    else
+      WORKERS_SUMMARY="none — no worker CLI installed (claude, codex, agy, muse)"
+    fi
   else
     WORKERS_SUMMARY="$_n enabled"
   fi
 }
 
+# A crash, an empty report, or a truncated report is a failed health check too. Kept as a
+# standalone function so CI validates its doctor output with the same rule as the installer.
+doctor_report_ok() {
+  awk -v status="$2" -v allow_launchers="${3:-0}" '
+    NF { last = NR }
+    /^[^[:space:]]+[[:space:]]+(OK|FAIL|SKIP)[[:space:]]+[^[:space:]]+[[:space:]]*$/ {
+      counts[$2]++
+      if ($2 == "FAIL" && $3 !~ /^bridge_dispatch:launcher:/) blocking++
+    }
+    /^summary: [0-9]+ ok, [0-9]+ fail, [0-9]+ skip \([0-9]+ total\)$/ {
+      summaries++; summary_line = NR
+      ok = $2; fail = $4; skip = $6; total = $8; sub(/^\(/, "", total)
+    }
+    END {
+      if (summaries != 1 || summary_line != last || total < 1 ||
+          counts["OK"] != ok || counts["FAIL"] != fail || counts["SKIP"] != skip ||
+          ok + fail + skip != total) exit 1
+      if (fail == 0) exit (status != 0)
+      exit !(status == 1 && allow_launchers == 1 && blocking == 0)
+    }
+  ' "$1"
+}
+
 gate_on_doctor() {
   _dlog="${TMPDIR:-/tmp}/datacore-doctor.$$.log"
-  "$BUNDLE_DIR/doctor.sh" >"$_dlog" 2>&1 || true
-  _fails=$(grep ' FAIL ' "$_dlog" | sed 's/.* FAIL //' | awk '{print $1}' || true)
-  _blocking=$(printf '%s\n' "$_fails" | grep -v "$WORKER_LAUNCHER_CHECK" | grep -v '^$' || true)
-  _workers=$(printf '%s\n' "$_fails" | grep "$WORKER_LAUNCHER_CHECK" | grep -c . || true)
-
-  if [ -n "$_blocking" ]; then
-    die "Datacore started, but doctor reports a problem." "$_blocking
+  _doctor_status=0
+  "$BUNDLE_DIR/doctor.sh" >"$_dlog" 2>&1 || _doctor_status=$?
+  if ! doctor_report_ok "$_dlog" "$_doctor_status" 1; then
+    die "Datacore started, but its health checks did not pass (doctor exit $_doctor_status)." \
+      "The report must finish with a complete summary and no blocking failures.
 
 Full report: $_dlog
 Re-run:      $BIN_DIR/datacore doctor"
   fi
+  _workers=$(grep ' FAIL ' "$_dlog" | grep -c 'bridge_dispatch:launcher:' || true)
   rm -f "$_dlog"
   if [ "${_workers:-0}" -gt 0 ]; then
     ok "doctor: no blocking failures ($_workers optional worker CLI not installed)"
@@ -971,7 +994,7 @@ install_command() {
 # worker CLIs.
 install_login_agent() {
   [ "${DATACORE_SKIP_LOGIN_AGENT:-0}" = 1 ] && { info "autostart skipped (DATACORE_SKIP_LOGIN_AGENT)"; return 0; }
-  if [ "$PLATFORM_OS" != darwin ]; then
+  if [ "$PLATFORM_OS" != macos ]; then
     info "autostart at login is macOS-only here; start it yourself with: datacore start"
     return 0
   fi

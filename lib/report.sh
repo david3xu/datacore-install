@@ -1,13 +1,11 @@
 #!/bin/sh
-# Datacore readiness report — one page that says whether this install can actually do work.
+# Datacore preflight report — configuration checks and the next step when one fails.
 #
 # Usage: datacore report [--output PATH] [--no-open]
 #
 # `datacore doctor` answers "is each component healthy?", one check at a time, in a wall of text.
-# It does not answer the question a user actually has, which is "can this install dispatch work to
-# a worker, and if not, what is stopping it?" That answer depends on four things at once -- the
-# runtime, an enabled worker, that worker's launcher resolving on PATH, and the project being
-# mapped to a repository -- and three of them fail quietly.
+# This page combines runtime, worker, launcher and project checks. It does not log into a model
+# provider or run a task, so a passing preflight is not evidence of a model reply.
 #
 # So this gathers what doctor, worker, project and provider each know, computes that one verdict,
 # and writes a self-contained HTML page. No network, no fonts, no CDN: the page is a single file
@@ -35,9 +33,8 @@ usage() {
   cat <<'EOF'
 Usage: datacore report [options]
 
-Writes a self-contained HTML page describing what this install can and cannot do:
-the dispatch verdict, the gates that have to pass before any work is dispatched,
-the workers, the projects they work in, and every doctor check.
+Writes a self-contained HTML page with the preflight verdict, enabled workers,
+mapped projects and doctor checks. Model login and task completion are not tested.
 
 Options:
   --output PATH   where to write the page (default: a file in your temp directory)
@@ -88,7 +85,11 @@ DC="$SELF_DIR/datacore"
 
 # Every collection step tolerates failure: this command has to work on a broken install, which is
 # the only time anyone runs it.
-"$DC" doctor   2>&1 | redact > "$WORK/doctor.txt"   || true
+doctor_status=0
+doctor_output=$("$DC" doctor 2>&1) || doctor_status=$?
+printf '%s\n' "$doctor_output" | redact > "$WORK/doctor.txt"
+unset doctor_output
+printf '%s\n' "$doctor_status" > "$WORK/doctor-exit.txt"
 "$DC" worker  list 2>&1 | redact > "$WORK/worker.txt"   || true
 "$DC" project list 2>&1 | redact > "$WORK/project.txt"  || true
 "$DC" provider list 2>&1 | redact > "$WORK/provider.txt" || true
@@ -131,10 +132,11 @@ const safe = (s) => esc(String(s)
 function parseDoctor(text) {
   const checks = [];
   let summary = "";
+  let summaries = 0;
   for (const raw of text.split("\n")) {
     const m = raw.match(/^[^\s]+\s+(OK|FAIL|SKIP|WARN)\s+(.+?)\s*$/);
     if (m) { checks.push({ status: m[1].toLowerCase(), name: m[2], detail: [], remediation: "" }); continue; }
-    if (/^summary:/.test(raw)) { summary = raw.trim(); continue; }
+    if (/^summary:/.test(raw)) { summary = raw.trim(); summaries++; continue; }
     const d = raw.match(/^\s+(.*\S)\s*$/);
     if (d && checks.length) {
       const line = d[1];
@@ -142,10 +144,15 @@ function parseDoctor(text) {
       else checks[checks.length - 1].detail.push(line);
     }
   }
-  return { checks, summary };
+  const totals = summary.match(/^summary:\s+(\d+) ok, (\d+) fail, (\d+) skip \((\d+) total\)$/);
+  const complete = summaries === 1 && checks.length > 0 && totals
+    && ["ok", "fail", "skip"].every((status, i) => checks.filter((c) => c.status === status).length === Number(totals[i + 1]))
+    && checks.length === Number(totals[4]);
+  return { checks, summary, complete: Boolean(complete) };
 }
 
 const doctor = parseDoctor(read("doctor.txt"));
+const doctorExit = read("doctor-exit.txt").trim();
 const count = (s) => doctor.checks.filter((c) => c.status === s).length;
 
 // ---- parse the list commands -------------------------------------------
@@ -202,9 +209,11 @@ const gates = [
     detail: projects.length ? projects.map((p) => `${p.name} → ${p.path}`).join("  ·  ")
                             : "no project is mapped, so a dispatched task has nowhere to work",
     fix: "datacore project link <project> <path>" },
-  { label: "No check is failing", pass: failing === 0,
-    detail: failing === 0 ? (doctor.summary || "doctor reported no failures")
-                          : `${failing} failing: ${doctor.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ")}`,
+  { label: "Doctor completed without failures", pass: doctor.complete && doctorExit === "0" && failing === 0,
+    detail: !doctor.complete ? "doctor did not return a complete report; health is unknown"
+      : failing > 0 ? `${failing} failing: ${doctor.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ")}`
+      : doctorExit !== "0" ? `doctor exited with status ${doctorExit || "unknown"}; health is unknown`
+      : doctor.summary,
     fix: "datacore doctor" },
 ];
 const blocked = gates.filter((g) => !g.pass);
@@ -218,6 +227,7 @@ const cliOf = (name) => {
   if (/^claude/.test(f)) return "claude";
   if (/^codex/.test(f)) return "codex";
   if (/^agy/.test(f)) return "agy";
+  if (/^muse/.test(f)) return "muse";
   return "";
 };
 
@@ -317,14 +327,15 @@ td.empty{color:var(--muted);font-style:italic}
 footer{margin-top:3rem;padding-top:1.25rem;border-top:1px solid var(--line);color:var(--muted);font-size:.85rem}
 </style></head><body>
 <div class="wrap">
-  <div class="eyebrow">Datacore · readiness · ${esc(read("generated.txt").trim())}</div>
-  <h1>Can this install dispatch work?</h1>
+  <div class="eyebrow">Datacore · preflight · ${esc(read("generated.txt").trim())}</div>
+  <h1>Is this install configured for work?</h1>
 
   <div class="verdict" style="--vcol:var(${ready ? "--ok" : "--no"})">
-    <div class="headline">${ready ? "Yes. Every gate passes." : `No. ${blocked.length} gate${blocked.length === 1 ? "" : "s"} block${blocked.length === 1 ? "s" : ""} dispatch.`}</div>
+    <div class="headline">${ready ? "Preflight passes." : `${blocked.length} preflight check${blocked.length === 1 ? " needs" : "s need"} attention.`}</div>
     <p>${ready
-      ? "The runtime answers, a worker is enabled, its CLI resolves, a project is mapped, and no check is failing. A task created in a mapped project will be picked up."
-      : "Each blocked gate below carries the command that clears it. Three of these fail quietly during normal use — nothing reports them until a dispatched task never runs."}</p>
+      ? "The runtime answers, a worker is enabled, its CLI resolves, a project is mapped, and doctor completed without failures."
+      : "Each blocked check below names the next command to run."}</p>
+    <p><strong>Model login and task completion: unverified.</strong> Run your worker CLI once to confirm it answers, then complete one small task through Datacore.</p>
   </div>
 
   <div class="facts">
@@ -375,8 +386,8 @@ VERDICT=$("$BUN" "$JS" "$WORK" "$OUTPUT") || die "Could not build the report."
 
 printf 'Wrote %s\n' "$OUTPUT"
 case "$VERDICT" in
-  ready) printf 'Verdict: ready — every dispatch gate passes.\n' ;;
-  blocked:*) printf 'Verdict: %s gate(s) block dispatch. The page names each one and its fix.\n' "${VERDICT#blocked:}" ;;
+  ready) printf 'Verdict: ready — preflight only; model login and task completion are unverified.\n' ;;
+  blocked:*) printf 'Verdict: %s preflight check(s) need attention. The page names each one and its fix.\n' "${VERDICT#blocked:}" ;;
 esac
 
 if [ "$OPEN" -eq 1 ]; then
