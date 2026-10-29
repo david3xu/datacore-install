@@ -293,6 +293,31 @@ jobs:
       # A draft release is fully visible to its owner and invisible to everyone else, so every
       # check above can pass while the documented one-liner returns 404 for every user. The only
       # honest test is to fetch the documented URL the way a stranger would: unauthenticated.
+      # install.sh accepts DATACORE_VERSION=latest, and GitHub resolves "latest" to the newest
+      # release that is NOT a prerelease. So a pinned release left as a prerelease means the two
+      # install routes hand out different software: the README one-liner gets the pin, while
+      # `latest` and the repo's own "Latest release" link get whatever came before it. After
+      # v0.1.80 and v0.1.81 shipped as prereleases, `latest` still served v0.1.79 -- a build with
+      # no muse support and an unfixed `prune`.
+      #
+      # A warning rather than a failure on purpose: the remedy is a manual `gh release edit`, and
+      # a red main that is only waiting on a human step caused more confusion than it prevented
+      # earlier in this repo's history. Worth promoting to a failure once it reads clean.
+      - name: the release `latest` resolves to is the one install.sh pins
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          latest=$(gh api "repos/${{ github.repository }}/releases/latest" --jq .tag_name 2>/dev/null || echo "none")
+          echo "install.sh pins : $pinned"
+          echo "GitHub 'latest' : $latest"
+          if [ "$pinned" = "$latest" ]; then
+            echo "both install routes serve the same release"
+          else
+            echo "::warning::\`latest\` serves $latest while install.sh pins $pinned, so DATACORE_VERSION=latest and the repo's Latest-release link hand out different software than the README one-liner. Fix: gh release edit $pinned --prerelease=false"
+          fi
+
       - name: the documented one-liner is actually reachable
         run: |
           set -eu
@@ -1221,6 +1246,51 @@ jobs:
             || { echo "::error::the walkthrough maps a project before any task exists and that failed"; exit 1; }
           echo "a project maps with no prior task, as the README states"
 
+
+      # `datacore report` answers the question doctor does not: can this install dispatch at all?
+      # It was added in v0.1.80, named in CLI_FILES, and never executed by CI -- so the verb that
+      # tells a stuck user what is wrong was itself unproven. All four of its gates pass by this
+      # point in the walkthrough (runtime up, worker enabled, launcher on PATH, project mapped),
+      # so this is the one place in the matrix where it should report `ready`.
+      - name: '`datacore report` runs, and does not leak the tokens it can read'
+        run: |
+          set -eu
+          export PATH="$HOME/bin:$PATH"
+          ~/.datacore/bin/datacore report > report.log 2>&1 || { cat report.log; echo "::error::datacore report exited non-zero on an install where every gate passes"; exit 1; }
+          cat report.log
+          grep -q 'Verdict:' report.log || { echo "::error::report printed no verdict"; exit 1; }
+          grep -q 'Verdict: ready' report.log || echo "::warning::report ran but did not say ready; the gates above should all pass here"
+
+          html=$(sed -n 's/^Wrote //p' report.log | head -1)
+          test -n "$html" || { echo "::error::report did not say where it wrote the page"; exit 1; }
+          test -s "$html" || { echo "::error::report wrote no page at $html"; exit 1; }
+          head -c 200 "$html" | grep -qi '<!doctype html\|<html' || { echo "::error::$html is not an HTML page"; exit 1; }
+          grep -qi 'cdn\.\|https://fonts\.' "$html" && { echo "::error::the page loads a remote asset; it has to render on a broken machine with no network"; exit 1; } || true
+          echo "report wrote a self-contained page: $(wc -c < "$html") bytes"
+
+          # The page is built from files that contain live worker tokens, so redaction is the
+          # security property worth asserting rather than assuming. Compared in python so the
+          # token never reaches a command line or a process listing.
+          python3 - "$html" <<'PYCHK'
+          import os, pathlib, sys
+          html = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+          env = pathlib.Path(os.path.expanduser("~/.datacore/current/generated/client-tokens.env"))
+          if not env.exists():
+              print("::warning::no client-tokens.env on this install, so redaction was not exercised")
+              raise SystemExit(0)
+          toks = [v.strip().strip('"\'') for line in env.read_text().splitlines()
+                  if "=" in line and not line.startswith("#")
+                  for v in [line.split("=", 1)[1]] if len(v.strip().strip('"\'')) >= 12]
+          if not toks:
+              print("::warning::no token long enough to test redaction against")
+              raise SystemExit(0)
+          leaked = sum(1 for t in toks if t in html)
+          if leaked:
+              print(f"::error::the report page contains {leaked} live token(s) verbatim")
+              raise SystemExit(1)
+          print(f"none of the {len(toks)} live token(s) appear in the page")
+          PYCHK
+
   meta-worker:
     name: a new user can dispatch to a Meta model
     runs-on: ubuntu-24.04
@@ -1529,3 +1599,108 @@ jobs:
               raise SystemExit(1)
           PY
           echo "the muse worker survived a reinstall"
+
+  upgrade:
+    name: an upgrade keeps what you had
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every other job in this file installs one version, twice at most. The defect that shipped
+      # in v0.1.80 was an *upgrade* defect -- `prune` runs on every install, an upgrade re-mints the
+      # registry with the full minted set, and the opt-in workers somebody had enabled were deleted
+      # with nothing printed. A unit matrix now covers prune's logic, but nothing drove the real
+      # thing: install an older release, enable a worker, run the documented command, look again.
+      # That is this job, and it is the shape of test that would have caught the bug.
+      #
+      # `agy` is the opt-in family used here because it exists in both releases; v0.1.79 has no
+      # muse families at all. The property under test belongs to prune, not to any one CLI.
+      - name: Install the previous release, as a user on it would have
+        env:
+          DATACORE_ACCEPT_EULA: '1'
+          DATACORE_VERSION: v0.1.79
+        run: |
+          set -eu
+          # Fetched from the v0.1.79 tag, not from main: a user on 0.1.79 ran that script and got
+          # that release's helpers. Running the checkout's install.sh would hand the OLD install the
+          # NEW lib/worker.sh -- it prefers a sibling file -- and the upgrade would test nothing.
+          curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/v0.1.79/install.sh | sh > old.log 2>&1 || { cat old.log; exit 1; }
+          tail -6 old.log
+          grep -q '0\.1\.79' old.log || { echo "::error::expected a 0.1.79 install"; exit 1; }
+
+      # Without this the job could silently degrade into two installs of the same version, and
+      # "the worker survived" would prove nothing at all.
+      - name: Confirm the old install really has the unfixed prune
+        run: |
+          set -eu
+          w=~/.datacore/bin/lib/worker.sh
+          test -f "$w" || { echo "::error::no lib/worker.sh installed"; exit 1; }
+          if grep -q 'DATACORE_WORKER_PRIOR_REGISTRY' "$w"; then
+            echo "::error::the 0.1.79 install already carries the prune fix, so this job is not testing an upgrade"
+            exit 1
+          fi
+          echo "the old install has the pre-fix prune, so the upgrade below is a real one"
+
+      - name: Enable an opt-in worker on the old release
+        run: |
+          set -eu
+          mkdir -p ~/bin
+          printf '#!/bin/sh\nexit 0\n' > ~/bin/agy
+          chmod +x ~/bin/agy
+          export PATH="$HOME/bin:$PATH"
+
+          ~/.datacore/bin/datacore worker add agy > add.log 2>&1 || { cat add.log; echo "::error::could not enable an agy worker on 0.1.79"; exit 1; }
+          cat add.log
+          python3 - <<'PY'
+          import json, os, sys
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          agy = [w['agent_id'] for w in reg if (w.get('agent_id') or '').startswith('agy') and w.get('phases')]
+          print("agy workers before the upgrade:", agy)
+          if not agy:
+              print("::error::nothing was enabled, so 'survived the upgrade' would be vacuous", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+          # The mirror outside the versioned bundle is what carries the choice across the upgrade.
+          # If the old release never wrote it, the fix cannot work and this job must say so.
+          h=$(grep '^DATACORE_HOME=' ~/.datacore/current/.env | head -1 | cut -d= -f2-)
+          test -s "$h/runtime/worker-registry.json" \
+            || { echo "::error::0.1.79 wrote no registry mirror under \$DATACORE_HOME, so an upgrade cannot recover the choice"; exit 1; }
+          echo "the choice is recorded in the persistent mirror"
+
+      - name: Upgrade with the documented command
+        env:
+          DATACORE_ACCEPT_EULA: '1'
+        run: |
+          set -eu
+          export PATH="$HOME/bin:$PATH"
+          cmd=$(grep -m1 '^curl -fsSL .*install.sh | sh$' README.md)
+          test -n "$cmd" || { echo "::error::no one-liner in README.md"; exit 1; }
+          sh -c "$cmd" > new.log 2>&1 || { cat new.log; exit 1; }
+          tail -8 new.log
+          grep -q 'DATACORE_WORKER_PRIOR_REGISTRY' ~/.datacore/bin/lib/worker.sh \
+            || { echo "::error::the upgrade did not install a lib/worker.sh carrying the prune fix"; exit 1; }
+          echo "upgraded, and the new helper carries the fix"
+
+      - name: The worker you chose is still there
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import json, os, sys
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          agy = [w['agent_id'] for w in reg if (w.get('agent_id') or '').startswith('agy') and w.get('phases')]
+          dflt = [w['agent_id'] for w in reg
+                  if (w.get('agent_id') or '').startswith(('claude', 'codex')) and w.get('phases')]
+          print("agy workers after the upgrade:", agy)
+          print("default-profile workers after the upgrade:", dflt)
+          if not agy:
+              print("::error::the upgrade deleted the agy worker the user had enabled -- the v0.1.80 defect is back", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+          ~/.datacore/bin/datacore doctor > d.log 2>&1 || true
+          tail -1 d.log
+          fails=$(grep ' FAIL ' d.log | sed -E 's/.* FAIL ([A-Za-z0-9_:.-]+).*/\1/' | grep -E '^[a-z_]+:' | sort -u || true)
+          if [ -n "$fails" ]; then
+            echo "::error::the upgraded install has failing checks:"; printf '%s\n' "$fails"; exit 1
+          fi
+          echo "the chosen worker survived the upgrade and the install is healthy"
