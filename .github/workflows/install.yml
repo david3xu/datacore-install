@@ -259,6 +259,34 @@ jobs:
       # archives that were not the ones attached, because the assets were uploaded from a stale
       # build. The installer verifies the archive, so that fails loudly at install time; this
       # fails it at release time instead, which is where it can still be fixed.
+      # A draft release is fully visible to its owner and invisible to everyone else, so every
+      # check above can pass while the documented one-liner returns 404 for every user. The only
+      # honest test is to fetch the documented URL the way a stranger would: unauthenticated.
+      - name: the documented one-liner is actually reachable
+        run: |
+          set -eu
+          pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          url="https://raw.githubusercontent.com/${{ github.repository }}/$pinned/install.sh"
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$url")
+          echo "$url -> HTTP $code"
+          if [ "$code" != 200 ]; then
+            echo "::error::the install command in the README returns HTTP $code. The tag $pinned is not public — a draft release does not push its tag."
+            exit 1
+          fi
+
+      - name: the pinned release is published, not a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          draft=$(gh release view "$pinned" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)
+          echo "$pinned isDraft=$draft"
+          if [ "$draft" != false ]; then
+            echo "::error::$pinned is a draft. Its assets and tag are invisible to users, so the documented install command cannot work."
+            exit 1
+          fi
+
       - name: the published release is complete and self-consistent
         env:
           GH_TOKEN: ${{ github.token }}
@@ -268,12 +296,24 @@ jobs:
           names=$(gh release view "$pinned" --repo "${{ github.repository }}" --json assets \
                     --jq '.assets[].name' | sort)
           echo "assets attached to $pinned:"; printf '%s\n' "$names" | sed 's/^/  /'
+          # The CLI files are read out of install.sh's own CLI_FILES rather than listed here. A
+          # hand-kept list drifts the moment a new helper is added: lib/project.sh and
+          # lib/install-desktop-entry.py were both in CLI_FILES and absent from this list, so a
+          # release without them passed -- and `datacore project`, which gates every dispatch,
+          # would simply not exist on a real install.
+          cli=$(sed -n 's/^CLI_FILES="\(.*\)"$/\1/p' install.sh | tr ' ' '\n' | sed 's|^lib/||')
+          test -n "$cli" || { echo "::error::install.sh has no CLI_FILES"; exit 1; }
+          # One name per line, compared with grep -qxF. A multi-line pattern is a *list* of
+          # alternatives to grep, so a single `grep -qx "$cli"` passes as soon as any one entry
+          # matches -- it reads like a check and tests almost nothing. -F keeps a filename's dot
+          # from matching any character.
           missing=""
-          for want in datacore-local-edition-amd64.tar.gz datacore-local-edition-arm64.tar.gz \
-                      SHA256SUMS worker.sh provider.sh uninstall.sh datacore \
-                      uninstall-desktop-entry.py; do
-            printf '%s\n' "$names" | grep -qx "$want" || missing="$missing $want"
-          done
+          printf 'datacore-local-edition-amd64.tar.gz\ndatacore-local-edition-arm64.tar.gz\nSHA256SUMS\n%s\n' \
+            "$cli" > /tmp/want.txt
+          while IFS= read -r want; do
+            test -n "$want" || continue
+            printf '%s\n' "$names" | grep -qxF "$want" || missing="$missing $want"
+          done < /tmp/want.txt
           if [ -n "$missing" ]; then
             echo "::error::$pinned is missing:$missing"
             exit 1
@@ -289,6 +329,21 @@ jobs:
             echo "::error::$pinned has assets that do not match its own SHA256SUMS — they were uploaded from a different build"
             exit 1
           fi
+
+          # `sha256sum -c` only vouches for the files the manifest names. install.sh deletes any
+          # CLI helper the manifest omits (rightly -- it will not put an unverified file on PATH),
+          # so an attached-but-unlisted helper is as absent as a missing one, and only warns.
+          unlisted=""
+          while IFS= read -r want; do
+            test -n "$want" || continue
+            case "$want" in SHA256SUMS) continue ;; esac
+            grep -q " $want\$" SHA256SUMS || unlisted="$unlisted $want"
+          done < /tmp/want.txt
+          if [ -n "$unlisted" ]; then
+            echo "::error::$pinned ships these without a SHA256SUMS entry, so install.sh will refuse them:$unlisted"
+            exit 1
+          fi
+          echo "SHA256SUMS accounts for every file install.sh installs"
 
   published:
     name: install from the published one-liner
@@ -779,3 +834,114 @@ jobs:
           printf '%s' "$out" | grep -q 'MAPPED=1' || { val; fail "a double-quoted real mapping was discarded"; }
 
           echo "installer rewrite holds: spaces kept, duplicates collapsed, \$HOME never written"
+
+  release-assembly:
+    name: a release cannot ship without the files install.sh needs
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # v0.1.79 was assembled by hand and shipped 7 of the 9 files it needed: lib/project.sh and
+      # lib/install-desktop-entry.py were in CLI_FILES and in neither the assets nor SHA256SUMS.
+      # install.sh deletes any helper the manifest does not list, so `datacore project` -- the
+      # command the install summary names as the first next step -- did not exist, with only a
+      # warning line to say so. make-release.sh derives the asset set from CLI_FILES instead;
+      # these checks hold it to that.
+      - name: The assembled release carries every file install.sh installs
+        run: |
+          set -eu
+          T=$(mktemp -d)
+          pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          mkdir -p "$T/bundle"
+          for arch in amd64 arm64; do
+            echo "not a real bundle" > "$T/bundle/datacore-local-edition-$arch.tar.gz"
+          done
+
+          sh make-release.sh "$pinned" "$T/bundle" > "$T/out" 2>&1 \
+            || { cat "$T/out"; echo "::error::make-release.sh failed on a complete bundle dir"; exit 1; }
+
+          out="dist/$pinned"
+          test -f "$out/SHA256SUMS" || { echo "::error::no manifest was written"; exit 1; }
+
+          # Every name in CLI_FILES, flattened the way install.sh fetches it, must be staged AND
+          # listed. Deriving the list here from the same place the script does would let a broken
+          # sed pass both sides, so read CLI_FILES independently.
+          fail=0
+          for f in $(sed -n 's/^CLI_FILES="\(.*\)"$/\1/p' install.sh); do
+            n=$(basename "$f")
+            test -f "$out/$n" || { echo "::error::$n was not staged"; fail=1; }
+            grep -q "  $n\$" "$out/SHA256SUMS" || { echo "::error::$n is not in SHA256SUMS"; fail=1; }
+          done
+          for arch in amd64 arm64; do
+            n="datacore-local-edition-$arch.tar.gz"
+            test -f "$out/$n" || { echo "::error::$n was not staged"; fail=1; }
+            grep -q "  $n\$" "$out/SHA256SUMS" || { echo "::error::$n is not in SHA256SUMS"; fail=1; }
+          done
+          test "$fail" = 0 || exit 1
+
+          ( cd "$out" && sha256sum -c SHA256SUMS >/dev/null ) \
+            || { echo "::error::the generated manifest does not match the files it describes"; exit 1; }
+
+          # A file in the directory that no manifest line covers would be installed unverified or
+          # silently dropped, so the manifest must account for the whole directory, not a subset.
+          staged=$(ls "$out" | grep -v '^SHA256SUMS$' | sort)
+          listed=$(sed 's/^[0-9a-f]*  //' "$out/SHA256SUMS" | sort)
+          test "$staged" = "$listed" \
+            || { echo "::error::manifest and directory disagree"; diff <(echo "$staged") <(echo "$listed") || true; exit 1; }
+          echo "assembled $(grep -c . "$out/SHA256SUMS") assets, manifest covers exactly the directory"
+
+      - name: A release missing an architecture is refused, not shipped
+        run: |
+          set -eu
+          T=$(mktemp -d)
+          pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          mkdir -p "$T/bundle"
+          # arm64 only: exactly the shape of the published draft, where SHA256SUMS named an amd64
+          # archive that was never attached.
+          echo x > "$T/bundle/datacore-local-edition-arm64.tar.gz"
+          set +e
+          sh make-release.sh "$pinned" "$T/bundle" > "$T/out" 2>&1
+          status=$?
+          set -e
+          if [ "$status" = 0 ]; then
+            cat "$T/out"
+            echo "::error::a bundle dir with one architecture was accepted"
+            exit 1
+          fi
+          grep -q "amd64" "$T/out" || { cat "$T/out"; echo "::error::refusal does not name the missing architecture"; exit 1; }
+          echo "refused, naming the missing architecture"
+
+      - name: Assembling a version install.sh does not pin is refused
+        run: |
+          set -eu
+          T=$(mktemp -d); mkdir -p "$T/bundle"
+          for arch in amd64 arm64; do echo x > "$T/bundle/datacore-local-edition-$arch.tar.gz"; done
+          set +e
+          sh make-release.sh v0.0.1 "$T/bundle" > "$T/out" 2>&1
+          status=$?
+          set -e
+          if [ "$status" = 0 ]; then
+            cat "$T/out"
+            echo "::error::assembled a version the installer does not pin — users would download it and get a different install.sh"
+            exit 1
+          fi
+          echo "refused a version install.sh does not pin"
+
+      - name: A helper named in CLI_FILES but absent from the repo is refused
+        run: |
+          set -eu
+          T=$(mktemp -d); mkdir -p "$T/bundle"
+          for arch in amd64 arm64; do echo x > "$T/bundle/datacore-local-edition-$arch.tar.gz"; done
+          pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          sed -i 's|^CLI_FILES="\(.*\)"$|CLI_FILES="\1 lib/not-written-yet.sh"|' install.sh
+          set +e
+          sh make-release.sh "$pinned" "$T/bundle" > "$T/out" 2>&1
+          status=$?
+          set -e
+          if [ "$status" = 0 ]; then
+            cat "$T/out"
+            echo "::error::staged a release for a helper that does not exist, so the release would ship without it"
+            exit 1
+          fi
+          grep -q "not-written-yet.sh" "$T/out" || { cat "$T/out"; echo "::error::refusal does not name the missing helper"; exit 1; }
+          echo "refused, naming the helper that does not exist"

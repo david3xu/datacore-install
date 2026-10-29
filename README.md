@@ -60,11 +60,13 @@ run Docker's post-install step — the installer tells you the command.
    that already exists
 5. Shows the licence terms and records your acceptance
 6. Has Datacore generate its own configuration and service identities
-7. Starts Datacore and waits until it reports healthy
-8. Trims the worker registry to the CLIs you actually have, keeping the rest in a catalogue
-9. Registers Datacore with every AI client it finds, and **verifies the connection works**
-10. On macOS, sets Datacore to **start automatically at login**
-11. Prints one next step
+7. Writes a stand-in worker project map, so nothing is dispatched into a directory you did not
+   choose — you name the real repository yourself with `datacore project link`
+8. Starts Datacore and waits until it reports healthy
+9. Trims the worker registry to the CLIs you actually have, keeping the rest in a catalogue
+10. Registers Datacore with every AI client it finds, and **verifies the connection works**
+11. On macOS, sets Datacore to **start automatically at login**
+12. Prints the next steps in the order they matter, starting with whatever still blocks dispatch
 
 Nothing is hand-edited. You will not be asked to open a file in an editor.
 
@@ -250,6 +252,10 @@ holds your other MCP servers, so it is yours to delete once you have checked the
 Open an issue in this repository, and paste the output of `datacore doctor`. It prints one line
 per check with the reason and the remediation, and never prints a key or a token — but it does
 name local paths and ports, so read it before you post it.
+
+## Releasing
+
+For maintainers: [RELEASING.md](./RELEASING.md).
 
 ## Licence
 
