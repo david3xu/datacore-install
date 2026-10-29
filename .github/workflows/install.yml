@@ -1144,7 +1144,23 @@ jobs:
           export PATH="$HOME/bin:$PATH"
 
           # The walkthrough promises this one command is enough: no reinstall, no `worker sync`.
-          ~/.datacore/bin/datacore worker add claude
+          #
+          # install.sh comes from main but lib/*.sh come from the release, so this job can run new
+          # installer logic against an old helper -- the same situation the worker-trim step in the
+          # published job reports rather than fails on, because the fix is cutting a release, not
+          # reverting. A release whose lib/worker.sh predates the CLI-name selector rejects
+          # `claude`; the step still has to exercise steps 4 and 5, so it says so and falls back to
+          # the family name. The static drift check at the top of this job is what guards the fix
+          # itself, and it runs against the checkout.
+          if ! ~/.datacore/bin/datacore worker add claude; then
+            if grep -q 'CLI_BIN' lib/worker.sh; then
+              echo "::warning::the published lib/worker.sh predates the CLI-name selector, so 'worker add claude' is rejected on the released helper — cut a release carrying the current lib/worker.sh"
+              ~/.datacore/bin/datacore worker add claude-worker
+            else
+              echo "::error::'datacore worker add claude' failed and the checkout has no CLI_BIN map either, so the README's step 4 is simply wrong"
+              exit 1
+            fi
+          fi
           ~/.datacore/bin/datacore worker list
 
           n=$(python3 -c "
