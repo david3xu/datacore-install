@@ -243,10 +243,10 @@ registry_tool() {
 // entries on a stock install, 14 of them for a CLI (agy) its own catalogue flags as out of the
 // default profile. Nobody needs 29. This keeps the full set in the catalogue, which is where
 // `enable` takes tokens from, and leaves the registry holding only what was asked for.
-const { readFileSync, writeFileSync, existsSync, chmodSync } = require("fs");
+const { readFileSync, writeFileSync, existsSync, chmodSync, readdirSync, statSync } = require("fs");
 const { spawnSync } = require("child_process");
 const { mkdirSync } = require("fs");
-const { dirname } = require("path");
+const { dirname, join } = require("path");
 
 const [cmd, registryPath, cataloguePath, configPath, ...rest] = process.argv.slice(2);
 
@@ -497,6 +497,37 @@ if (!existsSync(registryPath)) die(`no worker registry at ${registryPath}`);
 const registry = read(registryPath);
 registry.workers = registry.workers || [];
 
+// Where the previous install's worker state can still be read from. Two kinds, deliberately kept
+// apart: a *registry* lists the workers that were enabled, so it is evidence of a choice; a
+// *catalogue* lists everything ever minted or provisioned, so it is only evidence of an identity
+// (and its token). Reading choices out of a catalogue would silently enable every family whose CLI
+// happens to be installed -- the opposite error from the one being fixed here.
+const priorRegistries = [];
+const priorCatalogues = [];
+{
+  const mirror = process.env.DATACORE_WORKER_PRIOR_REGISTRY || "";
+  if (mirror) priorRegistries.push(mirror);
+
+  const versionsDir = process.env.DATACORE_WORKER_VERSIONS_DIR || "";
+  const currentBundle = process.env.DATACORE_WORKER_CURRENT_BUNDLE || "";
+  if (versionsDir && existsSync(versionsDir)) {
+    try {
+      const prior = readdirSync(versionsDir)
+        .map((name) => join(versionsDir, name))
+        .filter((dir) => dir !== currentBundle)
+        .map((dir) => ({ dir, at: statSync(dir).mtimeMs }))
+        .sort((a, b) => b.at - a.at)
+        .slice(0, 1);
+      for (const { dir } of prior) {
+        priorCatalogues.push(join(dir, "generated", "azure-worker-catalogue.json"));
+        priorRegistries.push(join(dir, "generated", "azure-worker-registry.json"));
+      }
+    } catch {
+      // No readable versions directory: fall back to the mirror alone.
+    }
+  }
+}
+
 // The catalogue is seeded from the registry the first time, before anything is pruned away, so the
 // full minted set survives. Later runs keep whichever is larger: an upgrade rewrites the registry
 // with all 29 again, and that must not shrink a catalogue, nor lose a token the registry alone has.
@@ -519,17 +550,32 @@ catalogue.workers = catalogue.workers || [];
   //
   // The mirror under $DATACORE_HOME is outside the bundle and carries the full entry, including
   // the token, so it is the one place a provisioned identity survives. Merge it back in.
-  const priorRegistryPath = process.env.DATACORE_WORKER_PRIOR_REGISTRY || "";
+  // Two sources, because neither alone is enough.
+  //
+  // The mirror works for a direct `datacore worker prune`, and NOT during an install: measured on
+  // a real upgrade, the mirror still held both provisioned identities immediately before
+  // install.sh ran, prune saw none of them, and running prune by hand against the same restored
+  // mirror recovered them. The install regenerates the runtime registry from the new bundle's
+  // minted set before it trims, so by the time prune reads the mirror it has already been
+  // overwritten. Anything inside $DATACORE_HOME/runtime is therefore not a safe carrier here.
+  //
+  // The previous version's own directory is. $ROOT/current is a symlink into $ROOT/versions, and
+  // an upgrade adds a directory rather than replacing one, so the outgoing version's registry and
+  // catalogue are still on disk with their provisioned identities and tokens intact.
+  //
+  // Only the most recent prior version is consulted. Going further back would resurrect workers
+  // somebody disabled two versions ago, which is the opposite of honouring a choice.
   let recovered = 0;
-  if (priorRegistryPath && existsSync(priorRegistryPath)) {
+  for (const src of [...priorCatalogues, ...priorRegistries]) {
+    if (!src || !existsSync(src)) continue;
     try {
-      for (const w of read(priorRegistryPath).workers || []) {
+      for (const w of read(src).workers || []) {
         if (!w || !w.agent_id || byId.has(w.agent_id)) continue;
         byId.set(w.agent_id, w);
         recovered += 1;
       }
     } catch {
-      // Unreadable prior registry: carry nothing forward rather than fail an install.
+      // Unreadable source: skip it rather than fail an install.
     }
   }
   if (recovered) console.log(`  recovered ${recovered} worker identity/identities from the previous install`);
@@ -595,14 +641,14 @@ if (cmd === "prune") {
   // muse-review): `datacore worker add muse` worked, dispatched, and was gone after the next
   // install with nothing printed. A success message for work later undone.
   //
-  // The pre-upgrade registry is unrecoverable from the bundle (generated/ belongs to the new
-  // version), but its mirror under $DATA_HOME is written by writeRegistry() and persists, so it
-  // still holds the curated set at the moment prune runs. An entry with no phases is an identity
-  // rather than a dispatch target, so it is not a choice. A fresh install has no mirror and this
-  // set is empty, which is exactly the old behaviour.
-  const priorPath = process.env.DATACORE_WORKER_PRIOR_REGISTRY || "";
+  // A choice is read from the previous install's REGISTRY -- the mirror under $DATA_HOME for a
+  // direct `datacore worker prune`, and the outgoing version directory during an install, where
+  // the mirror has already been overwritten by the time prune runs (see priorRegistries). An
+  // entry with no phases is an identity rather than a dispatch target, so it is not a choice. A
+  // fresh install has neither source and this set is empty, exactly the old behaviour.
   const chosen = new Set();
-  if (priorPath && existsSync(priorPath)) {
+  for (const priorPath of priorRegistries) {
+    if (!priorPath || !existsSync(priorPath)) continue;
     try {
       for (const w of read(priorPath).workers || []) {
         if (isInfra(w) || !(w.phases || []).length) continue;
@@ -610,8 +656,8 @@ if (cmd === "prune") {
         if (fam) chosen.add(fam);
       }
     } catch {
-      // An unreadable mirror must not stop an install. Falling through leaves `chosen` empty,
-      // which prunes to the default profile -- the conservative answer, and what it did before.
+      // An unreadable source must not stop an install. Skipping it leaves `chosen` smaller, at
+      // worst empty, which prunes to the default profile -- what it did before any of this.
     }
   }
 
@@ -747,6 +793,8 @@ DATACORE_REGISTRY_JS
   # user chose from one the bundle merely minted. Passed by environment because `prune` is
   # variadic over installed CLIs, so a fifth positional would be read as a CLI name.
   DATACORE_WORKER_PRIOR_REGISTRY="$RUNTIME_REGISTRY" \
+  DATACORE_WORKER_VERSIONS_DIR="$ROOT/versions" \
+  DATACORE_WORKER_CURRENT_BUNDLE="$(cd "$ROOT/current" 2>/dev/null && pwd -P || true)" \
   "$_bun" "$_js" "$_cmd" "$REGISTRY" "$CATALOGUE" "$BUNDLE_CONFIG" "$@" || _rc=$?
   rm -f "$_js"
   return $_rc
