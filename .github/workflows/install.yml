@@ -1749,6 +1749,37 @@ jobs:
           ws = json.load(open(p))['workers'] if os.path.exists(p) else []
           print(' ', len(ws), 'entries:', sorted({(w.get('agent_id') or '').split('@')[0] for w in ws}))" || true
 
+      # prune is reached two ways: install.sh calls it, and `datacore worker prune` calls it. The
+      # install path kept nothing while the local replay of the same inputs recovers the
+      # identities, so run prune directly against the same mirror and compare. If it recovers
+      # here, the install path is handing it something different; if it does not, the recovery
+      # itself is wrong on this machine. Either answer names the next edit.
+      - name: Run prune directly against the same mirror
+        run: |
+          set -eu
+          export PATH="$HOME/bin:$PATH"
+          h=$(cat /tmp/before/data_home)
+          cp /tmp/before/mirror.json "$h/runtime/worker-registry.json"
+          echo "mirror restored     : $(python3 -c "
+          import json; print([w['agent_id'] for w in json.load(open('$h/runtime/worker-registry.json'))['workers'] if w.get('phases')])")"
+          echo "prior-registry var  : ${DATACORE_WORKER_PRIOR_REGISTRY:-<unset, worker.sh sets it>}"
+
+          # Remove the catalogue the failed upgrade wrote, so seeding runs from scratch exactly as
+          # it does on a real upgrade. Keeping it would mask the defect being measured.
+          rm -f ~/.datacore/current/generated/azure-worker-catalogue.json
+
+          ~/.datacore/bin/datacore worker prune > direct.log 2>&1 || { cat direct.log; echo "::error::datacore worker prune failed outright"; exit 1; }
+          cat direct.log
+          if grep -qF 'worker identity/identities from the previous install' direct.log; then
+            echo "DIRECT PRUNE RECOVERED — the install path hands prune something different"
+          else
+            echo "DIRECT PRUNE DID NOT RECOVER — the recovery itself is at fault, not install.sh"
+          fi
+          python3 -c "
+          import json, os
+          ws = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          print('after direct prune  :', [w['agent_id'] for w in ws if w.get('phases')])"
+
       - name: The worker you chose is still there
         run: |
           set -eu
