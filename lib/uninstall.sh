@@ -150,7 +150,16 @@ remove_client_entries() {
 
   if [ -n "$removed" ]; then
     ok "removed the Datacore entry from $removed"
-    [ -n "${_desktop_backup:-}" ] && info "previous Claude Desktop config kept at $_desktop_backup"
+    # An `if`, not `[ ... ] && info`, and the reason is not style. That list was the last command in
+    # this branch, so its status became the function's, and `remove_client_entries` is called as a
+    # plain command under `set -e`. With a Claude Code entry removed and no Claude Desktop entry --
+    # every Linux machine and most Macs -- the test was false, the function returned 1, and the
+    # uninstall aborted here: after disconnecting the client and before removing the images, the
+    # data or the install tree, while exiting non-zero. It looked like a failed uninstall and left a
+    # half-removed install behind.
+    if [ -n "${_desktop_backup:-}" ]; then
+      info "previous Claude Desktop config kept at $_desktop_backup"
+    fi
   else
     info "no AI client entry for this install"
   fi
