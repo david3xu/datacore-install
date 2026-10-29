@@ -1188,7 +1188,13 @@ jobs:
       - name: Mapping a project works before any task exists — the walkthrough's step 5
         run: |
           set -eu
-          mkdir -p ~/repo && git -C ~/repo init -q && git -C ~/repo commit -q --allow-empty -m init
+          # A fresh runner has no git identity, so `git commit` exits 128 with "Author identity
+          # unknown" -- a failure of this test, not of the product. Set it on the repo only.
+          mkdir -p ~/repo
+          git -C ~/repo init -q
+          git -C ~/repo config user.email ci@example.invalid
+          git -C ~/repo config user.name CI
+          git -C ~/repo commit -q --allow-empty -m init
           ~/.datacore/bin/datacore project link my-project ~/repo
           ~/.datacore/bin/datacore project list | tee project.log
           grep -q "my-project" project.log \
