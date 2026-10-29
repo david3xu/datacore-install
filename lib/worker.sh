@@ -303,16 +303,15 @@ function readState() {
 // does not resolve, so a single install run with the binary off $PATH would turn "enabled, not
 // currently runnable" into "never asked for" and the choice would be gone for good. Hence the
 // union below, and `forget` as the one way to take a family out.
-function writeState(reg, forget) {
+function writeState(opts) {
   if (!STATE_PATH) return;
-  const fam = (w) => String(w.agent_id || "").split("@")[0];
   const prev = readState();
-  const live = (reg.workers || [])
-    .filter((w) => !isInfra(w) && (w.phases || []).length)
-    .map(fam)
-    .filter(Boolean);
-  const dropped = new Set(forget || []);
-  const chosen = [...new Set([...((prev && prev.chosen) || []), ...live])]
+  const dropped = new Set((opts && opts.forget) || []);
+  // Intent is never inferred from the registry that was just written. prune drops families whose
+  // CLI does not currently resolve, so deriving intent from the result would turn "enabled, not
+  // runnable right now" into "never asked for" after a single install with the binary off $PATH.
+  // Only an explicit `choose` adds, and only an explicit `forget` removes.
+  const chosen = [...new Set([...((prev && prev.chosen) || []), ...((opts && opts.choose) || [])])]
     .filter((f) => !dropped.has(f))
     .sort();
   const identities = (catalogue.workers || []).filter((w) => !isInfra(w));
@@ -329,7 +328,7 @@ function writeRegistry(doc, opts) {
   write(registryPath, doc);
   for (const p of MIRRORS) write(p, doc);
   writeExecutors(doc);
-  writeState(doc, opts && opts.forget);
+  writeState(opts);
 }
 
 // ---- executor profiles --------------------------------------------------------------------------
@@ -779,6 +778,17 @@ if (cmd === "prune") {
 
   if (debug) console.log("  [debug] chosen families:", [...chosen].join(", ") || "<none>");
 
+  // What the migration learned has to be persisted as intent, not just whatever ends up enabled.
+  // Measured in CI run 40889424187: the migration derived six families and the choices file came
+  // back with only the two whose CLI was installed on the runner, so a family chosen on the old
+  // version but temporarily absent from $PATH would have been forgotten for good. Families in the
+  // bundle's default profile are left out: they need no record, and recording them would resist a
+  // later release that intentionally drops one from the default set.
+  const migrated = state ? [] : [...chosen].filter((f) => {
+    const meta = fams.get(f);
+    return meta ? !meta.inDefault : true;
+  });
+
   const keep = onePerFamily(catalogue.workers, fams, (w, meta, fam) => {
     if (isInfra(w)) return false;
     // The default profile, or an explicit choice. A choice outranks the default: the user asked.
@@ -786,7 +796,7 @@ if (cmd === "prune") {
     return present.has(meta.cli || w.cli);          // and the CLI has to actually be installed
   });
   registry.workers = [...catalogue.workers.filter(isInfra), ...keep];
-  writeRegistry(registry);
+  writeRegistry(registry, { choose: migrated });
   const n = summarise(registry.workers);
   console.log(`  ${n} worker(s) enabled of ${catalogue.workers.filter((w) => !isInfra(w)).length} the bundle minted`);
   process.exit(0);
@@ -897,9 +907,18 @@ if (cmd === "enable" || cmd === "disable") {
   const add = selAlias ? pool : onePerFamily(pool, fams);
   const have = new Set(registry.workers.map((w) => w.agent_id));
   const fresh = add.filter((w) => !have.has(w.agent_id));
-  if (!fresh.length) { console.log(`  already enabled: ${add.map((w) => w.agent_id).join(", ")}`); process.exit(0); }
+  // The families the user just asked for, recorded whether or not anything changed in the
+  // registry. An install predating the choices file can have a worker enabled and unrecorded, and
+  // `worker add` on it reports "already enabled" and returns -- so without this the explicit ask
+  // would never reach the file, and the next upgrade would treat it as a default-profile accident.
+  const choose = [...new Set(add.map((w) => String(w.agent_id || "").split("@")[0]).filter(Boolean))];
+  if (!fresh.length) {
+    writeState({ choose });
+    console.log(`  already enabled: ${add.map((w) => w.agent_id).join(", ")}`);
+    process.exit(0);
+  }
   registry.workers = [...registry.workers, ...fresh];
-  writeRegistry(registry);
+  writeRegistry(registry, { choose });
   console.log(`  enabled ${fresh.length} worker(s)`);
   summarise(registry.workers);
   process.exit(0);

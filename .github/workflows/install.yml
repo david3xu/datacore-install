@@ -1840,6 +1840,51 @@ jobs:
               raise SystemExit(1)
           PY
 
+      # A choice must outlive a prune that cannot see the CLI. prune drops families whose binary
+      # does not resolve -- correctly, nothing could dispatch to them -- but it must not conclude
+      # the family was never asked for. Before the migrated set was persisted as intent, one
+      # install with the binary off $PATH forgot the choice permanently.
+      - name: A choice outlives a prune that cannot see the CLI
+        env:
+          DATACORE_WORKER_DEBUG: '1'
+        run: |
+          set -eu
+          export PATH="$HOME/bin:$PATH"
+          h=$(grep '^DATACORE_HOME=' ~/.datacore/current/.env | head -1 | cut -d= -f2-)
+          ~/.datacore/bin/datacore worker add agy > readd.log 2>&1 || { cat readd.log; exit 1; }
+          tail -3 readd.log
+
+          # bun lives at $INSTALL_ROOT/bin/bun and the helper finds it there, so a PATH without
+          # $HOME/bin leaves the helper working while `agy` genuinely does not resolve.
+          env -i HOME="$HOME" PATH=/usr/bin:/bin DATACORE_WORKER_DEBUG=1 \
+            DATACORE_INSTALL_ROOT="$HOME/.datacore" DATACORE_HOME="$h" \
+            sh ~/.datacore/bin/lib/worker.sh prune > blind.log 2>&1 || { cat blind.log; exit 1; }
+          grep -aE "CLIs present|enabled of" blind.log || true
+          grep -aqF "CLIs present   : <none>" blind.log \
+            || { cat blind.log; echo "::error::a CLI still resolved, so this step proves nothing"; exit 1; }
+
+          python3 - "$h/worker-state.json" <<'PY'
+          import json, sys
+          chosen = json.load(open(sys.argv[1]))['chosen']
+          print("chosen families after a prune that saw no CLI:", chosen)
+          if not any(f.startswith('agy') for f in chosen):
+              print("::error::the choice was forgotten by a prune that could not see the CLI",
+                    file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
+          # And it comes back when the CLI does.
+          ~/.datacore/bin/datacore worker prune > back.log 2>&1 || { cat back.log; exit 1; }
+          python3 - <<'PY'
+          import json, os, sys
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          agy = [w['agent_id'] for w in reg if (w.get('agent_id') or '').startswith('agy') and w.get('phases')]
+          print("agy workers once the CLI resolves again:", agy)
+          if not agy:
+              print("::error::the choice was remembered but the worker was not restored", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
       # The carrier itself: a path under $DATACORE_HOME that no part of the bundle rewrites, and it
       # holds tokens, so it must not be group- or world-readable.
       - name: The choices file is where it has to be, and is not readable by others
