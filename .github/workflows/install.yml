@@ -1016,6 +1016,53 @@ jobs:
       # walkthrough nobody executes drifts into fiction, and this is the page a new user follows,
       # so every step of it runs here -- deliberately with no `claude` on PATH at install time,
       # which is the state the walkthrough actually describes.
+      # `datacore worker add claude` died with "No worker matches 'claude'" while `add codex`
+      # worked, because the catalogue calls the CLI `claude-code` and codex's binary and catalogue
+      # name happen to be the same string. Every surface a user reads says `claude`: the install
+      # summary, doctor's launcher check, and the command they typed to install it. The selector
+      # now accepts it through a map in the JS half of lib/worker.sh, which is a twin of the `case`
+      # in the shell half -- so this asserts the two agree rather than trusting that they do.
+      - name: The worker selector accepts the names users are shown
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import re, pathlib, sys
+          src = pathlib.Path("lib/worker.sh").read_text()
+
+          m = re.search(r'const CLI_BIN = \{([^}]*)\}', src)
+          assert m, "CLI_BIN map not found in the JS half of lib/worker.sh"
+          js = dict(re.findall(r'"?([A-Za-z0-9_-]+)"?\s*:\s*"([A-Za-z0-9_-]+)"', m.group(1)))
+
+          case = re.search(r'case "\$_cli" in(.*?)esac', src, re.S)
+          assert case, "the _bin case statement not found in the shell half"
+          sh = {}
+          for pats, bin_ in re.findall(r'^\s*([A-Za-z0-9_|-]+)\)\s*_bin=([A-Za-z0-9_-]*)', case.group(1), re.M):
+              if not bin_:
+                  continue
+              sh[pats.split("|")[0]] = bin_
+
+          print("JS  CLI_BIN :", js)
+          print("shell _bin  :", sh)
+          if js != sh:
+              print("::error::the JS CLI_BIN map and the shell _bin case disagree", file=sys.stderr)
+              for k in sorted(set(js) | set(sh)):
+                  if js.get(k) != sh.get(k):
+                      print(f"  {k}: JS={js.get(k)!r} shell={sh.get(k)!r}", file=sys.stderr)
+              raise SystemExit(1)
+
+          # The binaries the installer tells the user about must be selectable. If the summary says
+          # "no worker CLI installed (claude, codex, agy)", then each of those has to be a name
+          # `datacore worker add` accepts, or the installer is naming things the CLI rejects.
+          inst = pathlib.Path("install.sh").read_text() + pathlib.Path("lib/worker.sh").read_text()
+          shown = re.findall(r'no worker CLI installed \(([^)]*)\)', inst)
+          assert shown, "could not find the installer's worker-CLI list"
+          for name in [n.strip() for n in shown[0].split(",")]:
+              if name not in js.values():
+                  print(f"::error::the installer shows '{name}' but the selector does not accept it", file=sys.stderr)
+                  raise SystemExit(1)
+          print("every CLI the installer names is a selector the CLI accepts:", shown[0])
+          PY
+
       - name: Install with no AI CLI present, as the walkthrough's step 1
         env:
           DATACORE_ACCEPT_EULA: '1'

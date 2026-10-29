@@ -573,11 +573,22 @@ if (cmd === "enable" || cmd === "disable") {
   const sel = rest[0];
   if (!sel) die(`usage: datacore worker ${cmd === "enable" ? "add" : "remove"} <cli|family|family@alias>`);
   const [selName, selAlias] = sel.split("@");
-  // A selector names a CLI (codex), a family (codex-review) or one exact worker (codex-review@gpt-6-luna).
+  // The catalogue calls Claude Code's CLI `claude-code`, but every surface a user reads calls it
+  // `claude`: the install summary says "no worker CLI installed (claude, codex, agy)", doctor
+  // reports bridge_dispatch:launcher:claude, and `claude` is what they typed to install it. So
+  // `datacore worker add claude` has to work, and before this map it died with
+  // "No worker matches 'claude'" while `add codex` worked -- because codex's binary and catalogue
+  // name happen to be the same string. This is the twin of the `case` that resolves _bin in the
+  // shell half of this file; the CI job "the worker selector accepts the names users are shown"
+  // asserts the two agree.
+  const CLI_BIN = { "claude-code": "claude", codex: "codex", agy: "agy" };
+  // A selector names a CLI (codex, claude), a family (codex-review) or one exact worker
+  // (codex-review@gpt-6-luna).
   const matches = (w) => {
     const fam = familyOf(w);
     const meta = fams.get(fam) || {};
-    const hit = fam === selName || (meta.cli || w.cli) === selName || w.cli === selName;
+    const cli = meta.cli || w.cli;
+    const hit = fam === selName || cli === selName || w.cli === selName || CLI_BIN[cli] === selName;
     return hit && (!selAlias || w.model_alias === selAlias);
   };
 
@@ -637,8 +648,20 @@ if (cmd === "enable" || cmd === "disable") {
       summarise(registry.workers);
       process.exit(0);
     }
-    const names = [...new Set(catalogue.workers.filter((w) => !isInfra(w)).map((w) => familyOf(w)))];
-    die(`No worker matches '${sel}'.\n  Known: ${names.join(", ")}`);
+    // List the CLI names too. Listing families only sent a user who typed a CLI name away with a
+    // list that did not contain the thing they should have typed instead.
+    const live = catalogue.workers.filter((w) => !isInfra(w));
+    const names = [...new Set(live.map((w) => familyOf(w)))];
+    const clis = [...new Set(live.flatMap((w) => {
+      const cli = (fams.get(familyOf(w)) || {}).cli || w.cli;
+      return [cli, CLI_BIN[cli]].filter(Boolean);
+    }))];
+    die(
+      `No worker matches '${sel}'.\n` +
+        `  By CLI:    ${clis.join(", ")}\n` +
+        `  By family: ${names.join(", ")}\n` +
+        `  Or one exact model, e.g. ${names[0]}@<model>  (see: datacore worker list)`,
+    );
   }
   // Without an explicit alias, take one worker per family rather than every alias of it — the
   // whole point of this file is that `add codex` must not put eight more workers in the registry.
