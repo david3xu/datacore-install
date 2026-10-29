@@ -1293,6 +1293,11 @@ jobs:
           node --check /tmp/prune.js
           cfg=~/.datacore/current/support/install-config.js
           test -f "$cfg" || { echo "::error::no install-config.js in the installed bundle"; exit 1; }
+          # install.sh places a private bun and does not put it on PATH, which is why lib/worker.sh
+          # has find_bun() at all. Resolve it the same way rather than assuming a `bun` on PATH.
+          BUN=$(command -v bun || true); [ -n "$BUN" ] || BUN=~/.datacore/bin/bun
+          test -x "$BUN" || { echo "::error::no bun on PATH and none at ~/.datacore/bin/bun"; exit 1; }
+          echo "using bun at $BUN"; export BUN
 
           python3 - "$cfg" <<'PY' > /tmp/plan.json
           import json, re, sys
@@ -1328,7 +1333,7 @@ jobs:
               for stale in ("/tmp/pt/cat.json",):
                   if os.path.exists(stale): os.remove(stale)
               env = dict(os.environ, DATACORE_WORKER_PRIOR_REGISTRY=mirror)
-              subprocess.run(["bun", "/tmp/prune.js", "prune", "/tmp/pt/r.json", "/tmp/pt/cat.json",
+              subprocess.run([os.environ["BUN"], "/tmp/prune.js", "prune", "/tmp/pt/r.json", "/tmp/pt/cat.json",
                               os.path.expanduser("~/.datacore/current/support/install-config.js"), *present],
                              env=env, check=True, capture_output=True)
               ws = json.load(open("/tmp/pt/r.json"))["workers"]
