@@ -42,6 +42,9 @@ BUNDLE_CONFIG="$ROOT/current/support/install-config.js"
 # printed a new worker list while the bridge kept dispatching from the old one. So every write goes
 # to all of them. Copies are mirrored only where they already exist — this never creates one.
 RUNTIME_REGISTRY="${DATACORE_WORKER_REGISTRY_PATH:-$DATA_HOME/runtime/worker-registry.json}"
+# Deliberately NOT under $DATA_HOME/runtime: the bundle's own installer regenerates that directory
+# during an install, which is what makes the registry mirror useless as a record of a choice.
+WORKER_STATE="${DATACORE_WORKER_STATE_PATH:-$DATA_HOME/worker-state.json}"
 MIRRORS="$RUNTIME_REGISTRY"
 
 # The compose project names the workspace directory. The datacore dispatcher exports it after
@@ -243,7 +246,7 @@ registry_tool() {
 // entries on a stock install, 14 of them for a CLI (agy) its own catalogue flags as out of the
 // default profile. Nobody needs 29. This keeps the full set in the catalogue, which is where
 // `enable` takes tokens from, and leaves the registry holding only what was asked for.
-const { readFileSync, writeFileSync, existsSync, chmodSync, readdirSync, statSync } = require("fs");
+const { readFileSync, writeFileSync, existsSync, chmodSync, readdirSync, statSync, realpathSync } = require("fs");
 const { spawnSync } = require("child_process");
 const { mkdirSync } = require("fs");
 const { dirname, join } = require("path");
@@ -266,10 +269,67 @@ const MIRRORS = (process.env.DC_REGISTRY_MIRRORS || "")
   .map((p) => p.trim())
   .filter((p) => p && p !== registryPath && existsSync(p));
 
-function writeRegistry(doc) {
+// ---- the choices file --------------------------------------------------------------------------
+//
+// Everything else worker state could be read from is rewritten by an install. The registry and
+// catalogue live in $ROOT/current/generated, inside the versioned bundle directory, so an upgrade
+// starts with whatever the new bundle minted. The mirror under $DATACORE_HOME/runtime is outside
+// the bundle but the bundle's own installer regenerates it, so by the time prune runs it no longer
+// says what the user had chosen -- measured on a real 0.1.79 -> 0.1.80 upgrade.
+//
+// This file is the one carrier nothing else writes: a path under $DATACORE_HOME that no part of
+// the bundle knows about. It holds two different things, kept apart on purpose:
+//
+//   chosen      the families the user enabled -- evidence of a CHOICE, and it shrinks on removal
+//   identities  provisioned workers and their tokens -- evidence an IDENTITY exists, nothing more
+//
+// Conflating them is the bug in both directions. Reading choices from a list of identities
+// enables every family whose CLI happens to be installed; losing the identities means a worker
+// that survives as a choice has no token to dispatch with.
+const STATE_PATH = process.env.DATACORE_WORKER_STATE || "";
+
+function readState() {
+  if (!STATE_PATH || !existsSync(STATE_PATH)) return null;
+  try {
+    const doc = read(STATE_PATH);
+    return doc && Array.isArray(doc.chosen) ? doc : null;
+  } catch {
+    return null;                      // Corrupt state must not stop an install; migrate instead.
+  }
+}
+
+// `chosen` records what the user asked for, so only `worker add` and `worker remove` may change
+// it. prune must never derive it from the registry it just wrote: prune drops families whose CLI
+// does not resolve, so a single install run with the binary off $PATH would turn "enabled, not
+// currently runnable" into "never asked for" and the choice would be gone for good. Hence the
+// union below, and `forget` as the one way to take a family out.
+function writeState(reg, forget) {
+  if (!STATE_PATH) return;
+  const fam = (w) => String(w.agent_id || "").split("@")[0];
+  const prev = readState();
+  const live = (reg.workers || [])
+    .filter((w) => !isInfra(w) && (w.phases || []).length)
+    .map(fam)
+    .filter(Boolean);
+  const dropped = new Set(forget || []);
+  const chosen = [...new Set([...((prev && prev.chosen) || []), ...live])]
+    .filter((f) => !dropped.has(f))
+    .sort();
+  const identities = (catalogue.workers || []).filter((w) => !isInfra(w));
+  try {
+    mkdirSync(dirname(STATE_PATH), { recursive: true });
+    write(STATE_PATH, { version: 1, chosen, identities });
+  } catch {
+    // Non-fatal. A failed write means the next upgrade falls back to migrating from the previous
+    // version directory, which is worse but not broken.
+  }
+}
+
+function writeRegistry(doc, opts) {
   write(registryPath, doc);
   for (const p of MIRRORS) write(p, doc);
   writeExecutors(doc);
+  writeState(doc, opts && opts.forget);
 }
 
 // ---- executor profiles --------------------------------------------------------------------------
@@ -512,9 +572,21 @@ const priorCatalogues = [];
   const currentBundle = process.env.DATACORE_WORKER_CURRENT_BUNDLE || "";
   if (versionsDir && existsSync(versionsDir)) {
     try {
+      // Resolved, not compared as written. $ROOT/versions holds a `current` symlink alongside the
+      // version directories, so the new bundle appears twice under two names; comparing the
+      // unresolved path let it through as "the most recent prior version", and prune then
+      // recovered the new bundle's own minted set from itself -- measured in CI run 40887743810,
+      // where the prior source came back as versions/current/generated and found no agy at all.
+      const seen = new Set();
       const prior = readdirSync(versionsDir)
-        .map((name) => join(versionsDir, name))
-        .filter((dir) => dir !== currentBundle)
+        .map((name) => {
+          try { return realpathSync(join(versionsDir, name)); } catch { return ""; }
+        })
+        .filter((dir) => {
+          if (!dir || dir === currentBundle || seen.has(dir)) return false;
+          seen.add(dir);
+          try { return statSync(dir).isDirectory(); } catch { return false; }
+        })
         .map((dir) => ({ dir, at: statSync(dir).mtimeMs }))
         .sort((a, b) => b.at - a.at)
         .slice(0, 1);
@@ -566,6 +638,15 @@ catalogue.workers = catalogue.workers || [];
   // Only the most recent prior version is consulted. Going further back would resurrect workers
   // somebody disabled two versions ago, which is the opposite of honouring a choice.
   let recovered = 0;
+  {
+    // The choices file first: it is the only source an install does not rewrite.
+    const st = readState();
+    for (const w of (st && st.identities) || []) {
+      if (!w || !w.agent_id || byId.has(w.agent_id)) continue;
+      byId.set(w.agent_id, w);
+      recovered += 1;
+    }
+  }
   for (const src of [...priorCatalogues, ...priorRegistries]) {
     if (!src || !existsSync(src)) continue;
     try {
@@ -668,18 +749,31 @@ if (cmd === "prune") {
     console.log("  [debug] catalogue has  :", catalogue.workers.filter((w) => !isInfra(w)).map((w) => w.agent_id).join(", ") || "<none>");
   }
 
+  // The choices file, when there is one, is the whole answer -- including when it says the user
+  // enabled nothing. Falling back to the version directories as well would undo every removal,
+  // because the outgoing version's registry still lists what was enabled before it.
   const chosen = new Set();
-  for (const priorPath of priorRegistries) {
-    if (!priorPath || !existsSync(priorPath)) continue;
-    try {
-      for (const w of read(priorPath).workers || []) {
-        if (isInfra(w) || !(w.phases || []).length) continue;
-        const fam = String(w.agent_id || "").split("@")[0];
-        if (fam) chosen.add(fam);
+  const state = readState();
+  if (state) {
+    for (const fam of state.chosen) if (fam) chosen.add(String(fam));
+    if (debug) console.log("  [debug] choices file   :", STATE_PATH, "(authoritative)");
+  } else {
+    // No choices file: an install that predates it. Migrate once, from the previous version's
+    // REGISTRY -- what was enabled -- and never from its catalogue, which lists everything minted.
+    // prune writes the choices file below, so this runs at most once per install root.
+    if (debug) console.log("  [debug] choices file   :", STATE_PATH || "<unset>", "(absent - migrating)");
+    for (const priorPath of priorRegistries) {
+      if (!priorPath || !existsSync(priorPath)) continue;
+      try {
+        for (const w of read(priorPath).workers || []) {
+          if (isInfra(w) || !(w.phases || []).length) continue;
+          const fam = String(w.agent_id || "").split("@")[0];
+          if (fam) chosen.add(fam);
+        }
+      } catch {
+        // An unreadable source must not stop an install. Skipping it leaves `chosen` smaller, at
+        // worst empty, which prunes to the default profile -- what it did before any of this.
       }
-    } catch {
-      // An unreadable source must not stop an install. Skipping it leaves `chosen` smaller, at
-      // worst empty, which prunes to the default profile -- what it did before any of this.
     }
   }
 
@@ -723,9 +817,15 @@ if (cmd === "enable" || cmd === "disable") {
 
   if (cmd === "disable") {
     const before = registry.workers.length;
+    // Taken before the filter: these are the families to forget, the only ones a choices-file
+    // write is allowed to drop.
+    const forget = [...new Set(registry.workers
+      .filter((w) => !isInfra(w) && matches(w))
+      .map((w) => String(w.agent_id || "").split("@")[0])
+      .filter(Boolean))];
     registry.workers = registry.workers.filter((w) => isInfra(w) || !matches(w));
     if (registry.workers.length === before) die(`Nothing enabled matches '${sel}'. Run: datacore worker list`);
-    writeRegistry(registry);
+    writeRegistry(registry, { forget });
     console.log(`  removed ${before - registry.workers.length} worker(s)`);
     summarise(registry.workers);
     process.exit(0);
@@ -816,6 +916,7 @@ DATACORE_REGISTRY_JS
   # registry in it) is newly minted by every install. `prune` needs it to tell a worker the
   # user chose from one the bundle merely minted. Passed by environment because `prune` is
   # variadic over installed CLIs, so a fifth positional would be read as a CLI name.
+  DATACORE_WORKER_STATE="$WORKER_STATE" \
   DATACORE_WORKER_PRIOR_REGISTRY="$RUNTIME_REGISTRY" \
   DATACORE_WORKER_VERSIONS_DIR="$ROOT/versions" \
   DATACORE_WORKER_CURRENT_BUNDLE="$(cd "$ROOT/current" 2>/dev/null && pwd -P || true)" \

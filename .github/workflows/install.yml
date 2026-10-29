@@ -1737,7 +1737,9 @@ jobs:
           echo "mirror path after    : $h_new/runtime/worker-registry.json"
           test -s "$h_new/runtime/worker-registry.json" && echo "mirror after exists  : yes" || echo "mirror after exists  : NO"
           echo "--- what the installer's worker step printed ---"
-          grep -iE "worker|prune|registry" new.log | head -12 || true
+          # Must include the debug marker: the trace lines naming paths and installed CLIs match
+          # none of worker|prune|registry, so the filter alone hid exactly the evidence needed.
+          grep -aiE "\[debug\]|worker|prune|registry" new.log | head -30 || true
           echo "--- registry now ---"
           python3 -c "
           import json, os
