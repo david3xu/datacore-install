@@ -1694,8 +1694,24 @@ jobs:
           # release's helpers, so every fix would have to ship before it could be tested -- and the
           # defect this job exists for was found exactly that way round. The published upgrade path
           # is covered by the `published` job and by the meta-worker reinstall assertion.
+          # Measured immediately before the upgrade, because this splits the failure in half: if
+          # agy is in the mirror and on PATH here and prune still keeps nothing, the fault is in
+          # prune or in what it is handed; if either is already missing, something between enabling
+          # the worker and running the installer took it away.
+          h=$(cat /tmp/before/data_home)
+          echo "command -v agy      : $(command -v agy || echo 'NOT ON PATH')"
+          python3 -c "
+          import json
+          ws = json.load(open('$h/runtime/worker-registry.json'))['workers']
+          print('mirror at upgrade   :', [w['agent_id'] for w in ws if w.get('phases')])"
+
           sh install.sh > new.log 2>&1 || { cat new.log; exit 1; }
           tail -8 new.log
+
+          # And what prune was handed. install.sh passes DATACORE_HOME explicitly, so the mirror
+          # path worker.sh computes has to match the one written above.
+          echo "--- prune's own lines from the install ---"
+          grep -aiE "recovered|worker\(s\) enabled|identity" new.log | head -5 || echo "(prune printed none of these)"
 
           # A guard, so the job cannot quietly test an older helper than the checkout's.
           w=~/.datacore/bin/lib/worker.sh
