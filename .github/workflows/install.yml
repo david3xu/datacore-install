@@ -438,6 +438,33 @@ jobs:
             echo "::warning::the released lib/worker.sh cannot trim the registry ($n workers enabled) — cut a release carrying the current lib/worker.sh"
           fi
 
+      # The released lib/uninstall.sh was never run by any job. The checkout job tests the copy in
+      # this repo, so a released helper could be -- and was -- broken while CI stayed green: a
+      # trailing `[ ... ] && info` made the uninstall abort after disconnecting the client and
+      # before removing the images, the data or the install tree, exiting 1 on every Linux machine.
+      # This runs the helper a user actually gets. It fails rather than warns, unlike the worker
+      # trim above, because the failure mode is not graceful degradation: it is a half-removed
+      # install that reports failure for work it completed.
+      - name: The released uninstaller removes the install, and says so
+        run: |
+          set -eu
+          ~/.datacore/bin/datacore uninstall --yes || {
+            echo "::error::the released lib/uninstall.sh exited non-zero — re-upload it to the release"
+            exit 1
+          }
+          for leftover in ~/.datacore/current ~/stub/entry.txt; do
+            if [ -e "$leftover" ]; then
+              echo "::error::the released uninstaller left $leftover behind"
+              exit 1
+            fi
+          done
+          test "$(docker ps -aq | wc -l)" = 0 || {
+            echo "::error::the released uninstaller left containers running"
+            docker ps -a
+            exit 1
+          }
+          echo "the released uninstaller removed the install tree, the client entry and the containers"
+
   desktop-entry:
     name: the Claude Desktop remover keeps its contract
     runs-on: ubuntu-24.04
