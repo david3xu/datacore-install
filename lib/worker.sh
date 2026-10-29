@@ -646,6 +646,28 @@ if (cmd === "prune") {
   // the mirror has already been overwritten by the time prune runs (see priorRegistries). An
   // entry with no phases is an identity rather than a dispatch target, so it is not a choice. A
   // fresh install has neither source and this set is empty, exactly the old behaviour.
+  // Three diagnoses of this bug were wrong because the install path was inferred from a local
+  // replay rather than measured. DATACORE_WORKER_DEBUG=1 makes prune state what it resolved, so
+  // the next wrong guess costs one CI run instead of a release. The CI upgrade job sets it.
+  const debug = process.env.DATACORE_WORKER_DEBUG === "1";
+  if (debug) {
+    console.log("  [debug] registryPath   :", registryPath);
+    console.log("  [debug] cataloguePath  :", cataloguePath, existsSync(cataloguePath) ? "(exists)" : "(absent)");
+    console.log("  [debug] versions dir   :", process.env.DATACORE_WORKER_VERSIONS_DIR || "<unset>",
+                existsSync(process.env.DATACORE_WORKER_VERSIONS_DIR || "") ? "(exists)" : "(absent)");
+    console.log("  [debug] current bundle :", process.env.DATACORE_WORKER_CURRENT_BUNDLE || "<unset>");
+    try {
+      const vd = process.env.DATACORE_WORKER_VERSIONS_DIR || "";
+      if (vd && existsSync(vd)) for (const n of readdirSync(vd)) {
+        console.log("  [debug]   version dir :", n, new Date(statSync(join(vd, n)).mtimeMs).toISOString());
+      }
+    } catch (e) { console.log("  [debug]   version dir listing failed:", e.message); }
+    for (const src of priorCatalogues) console.log("  [debug] prior catalogue:", src, existsSync(src) ? "(exists)" : "(absent)");
+    for (const src of priorRegistries) console.log("  [debug] prior registry :", src, existsSync(src) ? "(exists)" : "(absent)");
+    console.log("  [debug] CLIs present   :", [...present].join(", ") || "<none>");
+    console.log("  [debug] catalogue has  :", catalogue.workers.filter((w) => !isInfra(w)).map((w) => w.agent_id).join(", ") || "<none>");
+  }
+
   const chosen = new Set();
   for (const priorPath of priorRegistries) {
     if (!priorPath || !existsSync(priorPath)) continue;
@@ -660,6 +682,8 @@ if (cmd === "prune") {
       // worst empty, which prunes to the default profile -- what it did before any of this.
     }
   }
+
+  if (debug) console.log("  [debug] chosen families:", [...chosen].join(", ") || "<none>");
 
   const keep = onePerFamily(catalogue.workers, fams, (w, meta, fam) => {
     if (isInfra(w)) return false;

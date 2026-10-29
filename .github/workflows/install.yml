@@ -1685,6 +1685,7 @@ jobs:
       - name: Upgrade with the documented command
         env:
           DATACORE_ACCEPT_EULA: '1'
+          DATACORE_WORKER_DEBUG: '1'
         run: |
           set -eu
           export PATH="$HOME/bin:$PATH"
@@ -1749,52 +1750,60 @@ jobs:
           ws = json.load(open(p))['workers'] if os.path.exists(p) else []
           print(' ', len(ws), 'entries:', sorted({(w.get('agent_id') or '').split('@')[0] for w in ws}))" || true
 
-      # prune is reached two ways: install.sh calls it, and `datacore worker prune` calls it. The
-      # install path kept nothing while the local replay of the same inputs recovers the
-      # identities, so run prune directly against the same mirror and compare. If it recovers
-      # here, the install path is handing it something different; if it does not, the recovery
-      # itself is wrong on this machine. Either answer names the next edit.
-      - name: Run prune directly against the same mirror
+      # FIRST, before anything else touches the registry. This assertion used to sit after the
+      # diagnostic step below, which restored the mirror and ran `datacore worker prune` by hand --
+      # so the job went green on a run where the install's own prune had printed "0 worker(s)
+      # enabled of 4" and deleted the worker. A test whose subject is the install must read the
+      # state the install left, and nothing may run in between.
+      - name: The upgrade itself kept the worker you chose
         run: |
           set -eu
-          export PATH="$HOME/bin:$PATH"
-          h=$(cat /tmp/before/data_home)
-          cp /tmp/before/mirror.json "$h/runtime/worker-registry.json"
-          echo "mirror restored     : $(python3 -c "
-          import json; print([w['agent_id'] for w in json.load(open('$h/runtime/worker-registry.json'))['workers'] if w.get('phases')])")"
-          echo "prior-registry var  : ${DATACORE_WORKER_PRIOR_REGISTRY:-<unset, worker.sh sets it>}"
-
-          # Remove the catalogue the failed upgrade wrote, so seeding runs from scratch exactly as
-          # it does on a real upgrade. Keeping it would mask the defect being measured.
-          rm -f ~/.datacore/current/generated/azure-worker-catalogue.json
-
-          ~/.datacore/bin/datacore worker prune > direct.log 2>&1 || { cat direct.log; echo "::error::datacore worker prune failed outright"; exit 1; }
-          cat direct.log
-          if grep -qF 'worker identity/identities from the previous install' direct.log; then
-            echo "DIRECT PRUNE RECOVERED — the install path hands prune something different"
-          else
-            echo "DIRECT PRUNE DID NOT RECOVER — the recovery itself is at fault, not install.sh"
-          fi
-          python3 -c "
-          import json, os
-          ws = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
-          print('after direct prune  :', [w['agent_id'] for w in ws if w.get('phases')])"
-
-      - name: The worker you chose is still there
-        run: |
-          set -eu
+          grep -aqF 'worker identity/identities from the previous install' new.log \
+            || echo "::warning::the upgrade's own prune printed no recovery line"
           python3 - <<'PY'
           import json, os, sys
           reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
           agy = [w['agent_id'] for w in reg if (w.get('agent_id') or '').startswith('agy') and w.get('phases')]
-          dflt = [w['agent_id'] for w in reg
-                  if (w.get('agent_id') or '').startswith(('claude', 'codex')) and w.get('phases')]
-          print("agy workers after the upgrade:", agy)
-          print("default-profile workers after the upgrade:", dflt)
+          print("agy workers the UPGRADE left:", agy)
           if not agy:
-              print("::error::the upgrade deleted the agy worker the user had enabled -- the v0.1.80 defect is back", file=sys.stderr)
+              print("::error::the upgrade deleted the agy worker the user had enabled -- "
+                    "the v0.1.80 defect is back", file=sys.stderr)
               raise SystemExit(1)
           PY
+
+      # A worker the user REMOVED must not come back. This is the error the recovery can make in
+      # the other direction: the outgoing version directory still lists agy with phases, so a
+      # recovery that trusts it would resurrect a choice the user had reversed. Reinstalling is
+      # the cheapest way to run prune again against that same prior directory.
+      - name: A worker you removed stays removed
+        env:
+          DATACORE_ACCEPT_EULA: '1'
+          DATACORE_WORKER_DEBUG: '1'
+        run: |
+          set -eu
+          export PATH="$HOME/bin:$PATH"
+          ~/.datacore/bin/datacore worker remove agy > rm.log 2>&1 || { cat rm.log; exit 1; }
+          cat rm.log
+          sh install.sh > again.log 2>&1 || { cat again.log; exit 1; }
+          grep -aiE "\[debug\]|recovered|worker\(s\) enabled" again.log | head -20 || true
+          python3 - <<'PY'
+          import json, os, sys
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          agy = [w['agent_id'] for w in reg if (w.get('agent_id') or '').startswith('agy') and w.get('phases')]
+          print("agy workers after remove + reinstall:", agy)
+          if agy:
+              print("::error::a reinstall resurrected the agy worker the user had removed -- "
+                    "the recovery is over-restoring from the previous version directory", file=sys.stderr)
+              raise SystemExit(1)
+          cat = os.path.expanduser('~/.datacore/current/generated/azure-worker-catalogue.json')
+          ids = {w['agent_id']: bool(w.get('token')) for w in (json.load(open(cat))['workers'] if os.path.exists(cat) else [])}
+          print("agy identity kept in the catalogue for a later re-add:",
+                {k: v for k, v in ids.items() if k.startswith('agy')})
+          PY
+
+      - name: And the upgraded install is healthy
+        run: |
+          set -eu
           ~/.datacore/bin/datacore doctor > d.log 2>&1 || true
           tail -1 d.log
           fails=$(grep ' FAIL ' d.log | sed -E 's/.* FAIL ([A-Za-z0-9_:.-]+).*/\1/' | grep -E '^[a-z_]+:' | sort -u || true)
