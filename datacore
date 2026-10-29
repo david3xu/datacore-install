@@ -107,6 +107,8 @@ Running the stack:
 
 Diagnosing:
   doctor      diagnose problems, with remediation steps
+  report      write a shareable HTML page: can this install dispatch work, and
+              if not, which gate is blocking it
 
 Data:
   backup      back up the Datacore data directory
@@ -153,6 +155,7 @@ case "$verb" in
   enable)   not_yet enable  "Workers are turned on with: datacore worker add" ;;
   provider) run_lib_script provider.sh "$@" ;;
   worker)   run_lib_script worker.sh   "$@" ;;
+  report)   run_lib_script report.sh   "$@" ;;
   project)  run_lib_script project.sh  "$@" ;;
 
   *) printf 'Unknown command: %s\n' "$verb" >&2; exit 2 ;;

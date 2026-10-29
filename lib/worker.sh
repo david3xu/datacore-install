@@ -581,7 +581,7 @@ if (cmd === "enable" || cmd === "disable") {
   // name happen to be the same string. This is the twin of the `case` that resolves _bin in the
   // shell half of this file; the CI job "the worker selector accepts the names users are shown"
   // asserts the two agree.
-  const CLI_BIN = { "claude-code": "claude", codex: "codex", agy: "agy" };
+  const CLI_BIN = { "claude-code": "claude", codex: "codex", agy: "agy", muse: "muse" };
   // A selector names a CLI (codex, claude), a family (codex-review) or one exact worker
   // (codex-review@gpt-6-luna).
   const matches = (w) => {
@@ -716,6 +716,7 @@ cmd_add() {
     claude-code|claude-worker|claude-review) _bin=claude ;;
     codex|codex-worker|codex-review)         _bin=codex ;;
     agy|agy-review)                          _bin=agy ;;
+    muse|muse-worker|muse-review)            _bin=muse ;;
     *)                                       _bin='' ;;
   esac
 

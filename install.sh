@@ -899,7 +899,7 @@ register_clients() {
 # The front door is three files: the `datacore` dispatcher and the two lib scripts it execs for
 # `provider` and `worker`. Installing only the dispatcher leaves those verbs dead, so place all
 # three. Prefer siblings of this script (local run / dev); otherwise take them from the release.
-CLI_FILES="datacore lib/provider.sh lib/worker.sh lib/project.sh lib/uninstall.sh lib/uninstall-desktop-entry.py lib/install-desktop-entry.py"
+CLI_FILES="datacore lib/provider.sh lib/worker.sh lib/project.sh lib/report.sh lib/uninstall.sh lib/uninstall-desktop-entry.py lib/install-desktop-entry.py"
 
 install_command() {
   mkdir -p "$BIN_DIR/lib"
