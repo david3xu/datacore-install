@@ -107,6 +107,7 @@ installed_clis() {
   command -v claude >/dev/null 2>&1 && printf 'claude-code\n'
   command -v codex  >/dev/null 2>&1 && printf 'codex\n'
   command -v agy    >/dev/null 2>&1 && printf 'agy\n'
+  command -v muse   >/dev/null 2>&1 && printf 'muse\n'
   return 0
 }
 
@@ -701,7 +702,7 @@ cmd_add() {
       say "Worker CLIs installed on this machine: $_found"
       say "  Enable one:  datacore worker add codex"
     else
-      say "No worker CLI found on this machine (looked for: claude, codex, agy)."
+      say "No worker CLI found on this machine (looked for: claude, codex, agy, muse)."
       say "  Install one, then: datacore worker add <name>"
     fi
     say "  One model API:  datacore provider add meta"

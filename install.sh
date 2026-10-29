@@ -697,7 +697,7 @@ lean_workers() {
   fi
   _n=$(printf '%s\n' "$_out" | sed -n 's/^  \([0-9]\{1,\}\) worker(s) enabled.*/\1/p' | tail -1)
   if [ "${_n:-0}" = 0 ]; then
-    WORKERS_SUMMARY="none — no worker CLI installed (claude, codex, agy)"
+    WORKERS_SUMMARY="none — no worker CLI installed (claude, codex, agy, muse)"
   else
     WORKERS_SUMMARY="$_n enabled"
   fi

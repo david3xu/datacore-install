@@ -1200,3 +1200,175 @@ jobs:
           grep -q "my-project" project.log \
             || { echo "::error::the walkthrough maps a project before any task exists and that failed"; exit 1; }
           echo "a project maps with no prior task, as the README states"
+
+  meta-worker:
+    name: a new user can dispatch to a Meta model
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # `datacore worker add muse` resolving is only half of what a muse worker needs. `prune`
+      # keeps one worker per family *for CLIs that are actually installed*, and the installer calls
+      # it -- so a binary the selector accepts but the detector does not look for produces a worker
+      # that enables, dispatches, and is then silently removed by the next install. That is exactly
+      # what happened to muse: it was added to the CLI_BIN map and the `_bin` case, and left out of
+      # installed_clis. Assert the two agree instead of trusting that they do.
+      - name: Every CLI the selector resolves is one the detector looks for
+        run: |
+          set -eu
+          python3 - <<'PY'
+          import re, pathlib, sys
+          src = pathlib.Path("lib/worker.sh").read_text()
+
+          m = re.search(r'const CLI_BIN = \{([^}]*)\}', src)
+          assert m, "CLI_BIN map not found in the JS half of lib/worker.sh"
+          selectable = set(re.findall(r':\s*"([A-Za-z0-9_-]+)"', m.group(1)))
+
+          body = re.search(r'installed_clis\(\) \{(.*?)\n\}', src, re.S)
+          assert body, "installed_clis() not found in lib/worker.sh"
+          detected = set(re.findall(r'command -v (\S+)\s', body.group(1)))
+
+          print("selector resolves:", sorted(selectable))
+          print("detector looks for:", sorted(detected))
+          missing = selectable - detected
+          if missing:
+              print("::error::installed_clis() does not look for: " + ", ".join(sorted(missing))
+                    + " -- `worker add` accepts them, then `prune` removes them on the next install",
+                    file=sys.stderr)
+              raise SystemExit(1)
+          print("no selector/detector drift")
+          PY
+
+      - name: Install with no muse CLI present
+        env:
+          DATACORE_ACCEPT_EULA: '1'
+        run: |
+          set -eu
+          command -v muse >/dev/null 2>&1 && { echo "::error::a muse CLI exists; this job must start without one"; exit 1; } || true
+          cmd=$(grep -m1 '^curl -fsSL .*install.sh | sh$' README.md)
+          test -n "$cmd" || { echo "::error::no one-liner in README.md"; exit 1; }
+          sh -c "$cmd" > install.log 2>&1 || { cat install.log; exit 1; }
+          tail -14 install.log
+
+      # The three states the doctor check distinguishes, in order. Asserting the transitions and
+      # not merely "no failures" is the point: a doctor that stopped emitting the check at all
+      # would also report no failures.
+      - name: With nothing enabled and no binary, the muse launcher is skipped, not failed
+        run: |
+          set -eu
+          ~/.datacore/bin/datacore doctor > d1.log 2>&1 || true
+          grep -qE ' SKIP +bridge_dispatch:launcher:muse' d1.log || {
+            echo "::error::a machine with no muse worker and no muse binary must skip the check, not fail it"
+            grep -i muse d1.log || echo "(the check was not emitted at all)"
+            exit 1
+          }
+          echo "skipped, as a machine nobody asked to dispatch to Meta should be"
+
+      # The catalogue `worker add` matches against is compiled into the bundle, so this is the step
+      # that depends on a released bundle rather than on the checkout. install.sh comes from main
+      # while the bundle comes from the pinned release, so this job can run new installer logic
+      # against an older bundle -- the same lag the `published` job reports rather than blocks on,
+      # because the fix is cutting a release. Report it that way, and assert the full chain as soon
+      # as the release carries it. The static guard above runs against the checkout either way.
+      - name: Enabling a muse worker, then installing the CLI, turns the check OK
+        run: |
+          set -eu
+          if ! ~/.datacore/bin/datacore worker add muse > add.log 2>&1; then
+            cat add.log
+            if grep -q 'muse' lib/worker.sh; then
+              echo "::warning::the pinned release's bundle has no muse family, so 'worker add muse' is rejected — cut a release built from a platform tree carrying the Muse launcher"
+              echo "MUSE_IN_BUNDLE=0" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            echo "::error::'datacore worker add muse' failed and the checkout has no muse selector either"
+            exit 1
+          fi
+          echo "MUSE_IN_BUNDLE=1" >> "$GITHUB_ENV"
+          cat add.log
+          ~/.datacore/bin/datacore worker list
+
+          # The registry entry has to name the muse CLI and carry phases, or it is an identity
+          # rather than a dispatch target and nothing will ever be routed to it.
+          python3 - <<'PY'
+          import json, os, sys
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          muse = [w for w in reg if (w.get('agent_id') or '').startswith('muse')]
+          print("muse entries:", json.dumps(muse, indent=1))
+          if not muse:
+              print("::error::worker add muse reported success and enabled no muse worker", file=sys.stderr)
+              raise SystemExit(1)
+          dispatchable = [w for w in muse if w.get('phases')]
+          if not dispatchable:
+              print("::error::the muse entries carry no phases, so they are identities and nothing dispatches to them", file=sys.stderr)
+              raise SystemExit(1)
+          for w in dispatchable:
+              if w.get('cli') != 'muse':
+                  print(f"::error::{w['agent_id']} has cli={w.get('cli')!r}, so the bridge will not use the muse launcher", file=sys.stderr)
+                  raise SystemExit(1)
+          print("dispatchable muse workers:", [w['agent_id'] for w in dispatchable])
+          PY
+
+      - name: An enabled muse worker with no binary fails the check, by design
+        if: env.MUSE_IN_BUNDLE == '1'
+        run: |
+          set -eu
+          ~/.datacore/bin/datacore doctor > d2.log 2>&1 || true
+          grep -qE ' FAIL +bridge_dispatch:launcher:muse' d2.log || {
+            echo "::error::a muse worker is enabled and muse is absent; that must fail loudly, or green stops meaning 'can work'"
+            grep -i muse d2.log || echo "(the check was not emitted at all)"
+            exit 1
+          }
+          grep -A2 -E ' FAIL +bridge_dispatch:launcher:muse' d2.log | head -3
+          echo "failed with its remediation, which is what a user needs to see here"
+
+      # A stub is enough and is the only honest option: a real `muse` needs `muse login` against a
+      # Meta account, and no credential belongs in public CI. So this proves the bridge resolves
+      # and executes the binary it was told to -- not that a Meta model answered. The argv the
+      # launcher builds is covered by unit tests in the platform repo; what cannot be proven
+      # without a secret is left unproven rather than faked.
+      - name: Installing the CLI turns the check OK, and nothing else breaks
+        if: env.MUSE_IN_BUNDLE == '1'
+        run: |
+          set -eu
+          mkdir -p ~/bin
+          printf '#!/bin/sh\nexit 0\n' > ~/bin/muse
+          chmod +x ~/bin/muse
+          export PATH="$HOME/bin:$PATH"
+
+          ~/.datacore/bin/datacore doctor > d3.log 2>&1 || true
+          tail -1 d3.log
+          grep -qE ' OK +bridge_dispatch:launcher:muse' d3.log || {
+            echo "::error::muse is on PATH and a muse worker is enabled; the check must be OK"
+            grep -i muse d3.log || true
+            exit 1
+          }
+
+          fails=$(grep ' FAIL ' d3.log | sed -E 's/.* FAIL ([A-Za-z0-9_:.-]+).*/\1/' | grep -E '^[a-z_]+:' | sort -u || true)
+          if [ -n "$fails" ]; then
+            echo "::error::enabling a muse worker introduced a failure:"; printf '%s\n' "$fails"; exit 1
+          fi
+          echo "the muse launcher check is OK and nothing started failing"
+
+      # The detector gap this job's first step guards against is only visible after a prune, which
+      # is what the installer runs. Re-running the install with muse on PATH is the end-to-end form
+      # of that assertion: the worker has to still be there afterwards.
+      - name: A reinstall does not silently remove the muse worker
+        if: env.MUSE_IN_BUNDLE == '1'
+        env:
+          DATACORE_ACCEPT_EULA: '1'
+        run: |
+          set -eu
+          export PATH="$HOME/bin:$PATH"
+          command -v muse >/dev/null || { echo "::error::the stub muse vanished"; exit 1; }
+          sh -c "$(grep -m1 '^curl -fsSL .*install.sh | sh$' README.md)" > reinstall.log 2>&1 || { cat reinstall.log; exit 1; }
+          python3 - <<'PY'
+          import json, os, sys
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          muse = [w['agent_id'] for w in reg if (w.get('agent_id') or '').startswith('muse') and w.get('phases')]
+          print("muse workers after reinstall:", muse)
+          if not muse:
+              print("::error::the reinstall's prune removed the muse worker -- installed_clis() does not detect muse", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+          echo "the muse worker survived a reinstall"
