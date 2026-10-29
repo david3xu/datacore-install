@@ -100,9 +100,12 @@ datacore project link my-project ~/Developer/my-repo   # map a project to its re
 datacore project unlink my-project                     # remove a mapping
 ```
 
-The name has to be the project name as Datacore knows it — the one you see on a task or from
-`get_tasks` — and matching is **exact**. There is no `default` entry and no wildcard: an unmapped
-project fails with `No worker workspace configured for project: <name>`.
+The name is **yours to choose** — it is whatever you call the project when you create tasks, so you
+can map it before a single task exists, and that is the right time to do it. What matters is that
+the two agree afterwards: matching is **exact**, with no `default` entry and no wildcard, so a task
+whose project is `my-project` needs a mapping spelled `my-project`. A mismatch fails with
+`No worker workspace configured for project: <name>`, and `datacore project list` shows you the
+spelling you actually have.
 
 A fresh install has nothing to map yet, so it reports `none mapped` and says so in its summary
 rather than looking ready. Earlier installs left `{"default":"<your home directory>"}` in the
@@ -113,12 +116,15 @@ is still there.
 
 ### Workers
 
-A worker is an AI coding CLI that Datacore dispatches work to. Datacore mints a token for every
-CLI × model × role combination it knows — 29 of them — which is far more than anyone wants
-enabled. The installer therefore enables a lean set: **one implementation worker and one reviewer
-per CLI you actually have installed**, and only for the families Datacore ships in its default
-profile. The rest stay in a catalogue beside the registry, so enabling one later needs no new
-credentials.
+A worker is an AI coding CLI that Datacore dispatches work to. Datacore knows 29 combinations of
+CLI × model × role, which is far more than anyone wants enabled — and far more credentials than
+anyone wants minted. So the installer mints a token only for the lean set it enables: **one
+implementation worker and one reviewer per CLI you actually have installed**, and only for the
+families in Datacore's default profile. A stock install ends up with about five.
+
+The other combinations are listed but have no credential yet. `datacore worker add` mints the one
+it needs, on the spot, by asking the Runtime — so **the Runtime has to be running** to enable a
+worker that was never provisioned. `datacore worker list` marks which families are in that state.
 
 ```bash
 datacore worker list                       # what will be dispatched to
@@ -131,6 +137,19 @@ datacore worker prune                      # back to the lean default
 ```bash
 datacore worker sync                       # regenerate executor profiles from the registry
 ```
+
+**Installed an AI CLI after Datacore?** That is the common order — Datacore has no workers to
+enable until a CLI exists on `PATH`, so a first install on a clean machine reports
+`Workers  none — no worker CLI installed`. Install the CLI, log into it, then:
+
+```bash
+datacore worker add claude                 # or: codex
+datacore worker list                       # confirm it is there
+```
+
+There is nothing else to do and no need to reinstall. `worker add` regenerates the Coordinator's
+executor profiles and restarts the worker bridge itself, which are the two steps that would
+otherwise leave a worker enabled but never dispatched to.
 
 Three things gate dispatch besides the registry, and all three fail quietly:
 
