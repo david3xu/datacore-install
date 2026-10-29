@@ -1274,6 +1274,106 @@ jobs:
       # The three states the doctor check distinguishes, in order. Asserting the transitions and
       # not merely "no failures" is the point: a doctor that stopped emitting the check at all
       # would also report no failures.
+      # `prune` keeps one worker per family in the bundle's default profile, replaces the registry
+      # wholesale, and install.sh runs it on EVERY install. An upgrade re-mints the registry with
+      # the full set, so the pre-upgrade registry is gone by the time prune runs -- which meant
+      # every opt-in family a user had deliberately enabled was deleted on upgrade, silently.
+      # All four were affected: agy, agy-review, muse-worker, muse-review.
+      #
+      # The fix reads the registry mirror under $DATA_HOME, which writeRegistry() maintains and
+      # which survives an upgrade because it is not inside the versioned bundle. This exercises the
+      # real prune code, extracted from lib/worker.sh, against the installed bundle's own catalogue
+      # -- so it covers whichever opt-in families that bundle declares, not a list repeated here.
+      - name: An upgrade keeps the workers the user chose, not just the defaults
+        run: |
+          set -eu
+          awk '/^  cat > "\$_js" <<.DATACORE_REGISTRY_JS.$/{f=1;next} /^DATACORE_REGISTRY_JS$/{f=0} f' \
+            lib/worker.sh > /tmp/prune.js
+          test -s /tmp/prune.js || { echo "::error::could not extract the registry JS from lib/worker.sh"; exit 1; }
+          node --check /tmp/prune.js
+          cfg=~/.datacore/current/support/install-config.js
+          test -f "$cfg" || { echo "::error::no install-config.js in the installed bundle"; exit 1; }
+
+          python3 - "$cfg" <<'PY' > /tmp/plan.json
+          import json, re, sys
+          src = open(sys.argv[1]).read()
+          fams = []
+          # The bundle's config is minified, so booleans are `!0`/`!1` rather than true/false.
+          # Matching only true|false parsed zero families and the assert below is what said so.
+          for m in re.finditer(r'agentFamily:"([a-z0-9-]+)".*?cli:"([a-z0-9-]+)".*?inDefaultProfile:(!0|!1|true|false)', src):
+              fam, cli, dflt = m.group(1), m.group(2), m.group(3) in ("!0", "true")
+              fams.append({"family": fam, "cli": cli, "default": dflt})
+          assert fams, "parsed no families out of install-config.js"
+          optin = [f for f in fams if not f["default"]]
+          assert optin, "this bundle declares no opt-in families, so there is nothing to protect"
+          json.dump({"all": fams, "optin": optin}, sys.stdout)
+          print(f"families: {len(fams)}; opt-in: {[f['family'] for f in optin]}", file=sys.stderr)
+          PY
+
+          python3 - <<'PY'
+          import json, os, subprocess, sys
+          plan = json.load(open("/tmp/plan.json"))
+          fams, optin = plan["all"], plan["optin"]
+          clis = sorted({f["cli"] for f in fams})
+          target = optin[0]["family"]          # the family we pretend the user chose
+          os.makedirs("/tmp/pt", exist_ok=True)
+
+          def minted():
+              return [{"agent_id": f"{f['family']}@m1", "cli": f["cli"],
+                       "phases": ["review"] if "review" in f["family"] else ["implementation"],
+                       "token": "t"} for f in fams]
+
+          def run(mirror, present):
+              json.dump({"workers": minted()}, open("/tmp/pt/r.json", "w"))
+              for stale in ("/tmp/pt/cat.json",):
+                  if os.path.exists(stale): os.remove(stale)
+              env = dict(os.environ, DATACORE_WORKER_PRIOR_REGISTRY=mirror)
+              subprocess.run(["bun", "/tmp/prune.js", "prune", "/tmp/pt/r.json", "/tmp/pt/cat.json",
+                              os.path.expanduser("~/.datacore/current/support/install-config.js"), *present],
+                             env=env, check=True, capture_output=True)
+              ws = json.load(open("/tmp/pt/r.json"))["workers"]
+              return {w["agent_id"].split("@")[0] for w in ws if w.get("phases")}
+
+          # The mirror the user's choices would have left behind: the defaults plus `target`.
+          chosen = [w for w in minted()
+                    if w["agent_id"].split("@")[0] == target
+                    or any(f["family"] == w["agent_id"].split("@")[0] and f["default"] for f in fams)]
+          json.dump({"workers": chosen}, open("/tmp/pt/mirror.json", "w"))
+          json.dump({"workers": [w for w in chosen if w["agent_id"].split("@")[0] != target]},
+                    open("/tmp/pt/mirror-without.json", "w"))
+          open("/tmp/pt/bad.json", "w").write("not json")
+
+          fail = 0
+          def check(label, got, want_target, note):
+              global fail
+              ok = (target in got) == want_target
+              print(f"  {'ok  ' if ok else 'FAIL'} {label}: {target} {'kept' if target in got else 'dropped'} — {note}")
+              if not ok: fail = 1
+
+          check("upgrade, user chose it",      run("/tmp/pt/mirror.json", clis),         True,
+                "an explicit choice must outrank the default profile")
+          check("upgrade, user never chose it", run("/tmp/pt/mirror-without.json", clis), False,
+                "prune must not enable what nobody asked for")
+          check("fresh install, no mirror",    run("/tmp/pt/absent.json", clis),         False,
+                "unchanged from the old behaviour")
+          check("unreadable mirror",           run("/tmp/pt/bad.json", clis),            False,
+                "must fall back, not abort the install")
+          check("chosen but CLI uninstalled",  run("/tmp/pt/mirror.json",
+                                                   [c for c in clis if c != optin[0]["cli"]]), False,
+                "nothing can dispatch to it anyway")
+
+          # A guard on the test itself: if the defaults were not kept, the matrix above proves
+          # nothing, because every row would read as "dropped".
+          kept = run("/tmp/pt/mirror.json", clis)
+          defaults = {f["family"] for f in fams if f["default"]}
+          if not defaults <= kept:
+              print(f"::error::prune dropped default-profile families {sorted(defaults - kept)}; the rows above are meaningless")
+              fail = 1
+          else:
+              print(f"  ok   default-profile families all kept: {sorted(defaults)}")
+          sys.exit(fail)
+          PY
+
       # Everything below this point is a claim about the *bundle*, not about the checkout: the
       # worker catalogue, the model aliases and the launcher doctor check are all compiled into
       # the runtime image. install.sh is served from main while the bundle comes from the pinned
@@ -1402,6 +1502,17 @@ jobs:
           set -eu
           export PATH="$HOME/bin:$PATH"
           command -v muse >/dev/null || { echo "::error::the stub muse vanished"; exit 1; }
+
+          # This step installs via the README one-liner, so its lib/worker.sh comes from the
+          # pinned release, not the checkout. The prune fix is in a helper, so until a release
+          # carries it this asserts old code and fails for a reason the checkout already fixed --
+          # and the matrix step above proves the fix against the checkout either way. Report the
+          # lag and name the remedy, as the published and first-worker jobs do for the same shape.
+          if ! grep -q 'DATACORE_WORKER_PRIOR_REGISTRY' ~/.datacore/bin/lib/worker.sh; then
+            echo "::warning::the pinned release's lib/worker.sh predates the prune fix, so a reinstall still drops opt-in workers on a real install — cut a release carrying the current lib/worker.sh"
+            exit 0
+          fi
+
           sh -c "$(grep -m1 '^curl -fsSL .*install.sh | sh$' README.md)" > reinstall.log 2>&1 || { cat reinstall.log; exit 1; }
           python3 - <<'PY'
           import json, os, sys

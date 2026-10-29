@@ -558,9 +558,38 @@ if (cmd === "list") {
 if (cmd === "prune") {
   // rest = CLI binaries that resolve on this machine, as the family `cli` names them.
   const present = new Set(rest.filter(Boolean));
+
+  // Families the user went out of their way to enable. install.sh runs `prune` on EVERY install,
+  // upgrades included, and an upgrade re-mints the registry with the full set -- so a prune that
+  // keeps only default-profile families deleted, on every upgrade, exactly the workers somebody
+  // had chosen. All four opt-in families were affected (agy, agy-review, muse-worker,
+  // muse-review): `datacore worker add muse` worked, dispatched, and was gone after the next
+  // install with nothing printed. A success message for work later undone.
+  //
+  // The pre-upgrade registry is unrecoverable from the bundle (generated/ belongs to the new
+  // version), but its mirror under $DATA_HOME is written by writeRegistry() and persists, so it
+  // still holds the curated set at the moment prune runs. An entry with no phases is an identity
+  // rather than a dispatch target, so it is not a choice. A fresh install has no mirror and this
+  // set is empty, which is exactly the old behaviour.
+  const priorPath = process.env.DATACORE_WORKER_PRIOR_REGISTRY || "";
+  const chosen = new Set();
+  if (priorPath && existsSync(priorPath)) {
+    try {
+      for (const w of read(priorPath).workers || []) {
+        if (isInfra(w) || !(w.phases || []).length) continue;
+        const fam = String(w.agent_id || "").split("@")[0];
+        if (fam) chosen.add(fam);
+      }
+    } catch {
+      // An unreadable mirror must not stop an install. Falling through leaves `chosen` empty,
+      // which prunes to the default profile -- the conservative answer, and what it did before.
+    }
+  }
+
   const keep = onePerFamily(catalogue.workers, fams, (w, meta, fam) => {
     if (isInfra(w)) return false;
-    if (!meta.inDefault) return false;             // agy: the bundle itself flags it opt-in
+    // The default profile, or an explicit choice. A choice outranks the default: the user asked.
+    if (!meta.inDefault && !chosen.has(fam)) return false;
     return present.has(meta.cli || w.cli);          // and the CLI has to actually be installed
   });
   registry.workers = [...catalogue.workers.filter(isInfra), ...keep];
@@ -683,6 +712,12 @@ DATACORE_REGISTRY_JS
   # it takes zero. Positional "$2" "$3" "$4" would trip `set -u` in exactly that case.
   _cmd="$1"; shift
   _rc=0
+  # The mirror under $DATA_HOME is the only copy of the *enabled* set that survives an
+  # upgrade: $ROOT/current is a symlink to a versioned bundle dir, so generated/ (and the
+  # registry in it) is newly minted by every install. `prune` needs it to tell a worker the
+  # user chose from one the bundle merely minted. Passed by environment because `prune` is
+  # variadic over installed CLIs, so a fifth positional would be read as a CLI name.
+  DATACORE_WORKER_PRIOR_REGISTRY="$RUNTIME_REGISTRY" \
   "$_bun" "$_js" "$_cmd" "$REGISTRY" "$CATALOGUE" "$BUNDLE_CONFIG" "$@" || _rc=$?
   rm -f "$_js"
   return $_rc
