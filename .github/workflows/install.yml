@@ -1668,6 +1668,20 @@ jobs:
             || { echo "::error::0.1.79 wrote no registry mirror under \$DATACORE_HOME, so an upgrade cannot recover the choice"; exit 1; }
           echo "the choice is recorded in the persistent mirror"
 
+          # Snapshot what prune will read later. The upgrade's own prune rewrites this file, so
+          # after the fact there is no way to tell what it saw -- which is exactly the information
+          # needed when the assertion below fails.
+          mkdir -p /tmp/before
+          printf '%s\n' "$h" > /tmp/before/data_home
+          cp "$h/runtime/worker-registry.json" /tmp/before/mirror.json
+          readlink -f ~/.datacore/current > /tmp/before/bundle_dir
+          echo "DATACORE_HOME before : $h"
+          echo "bundle dir before    : $(cat /tmp/before/bundle_dir)"
+          python3 -c "
+          import json
+          ws = json.load(open('/tmp/before/mirror.json'))['workers']
+          print('mirror before        :', [w['agent_id'] for w in ws if w.get('phases')])"
+
       - name: Upgrade with the documented command
         env:
           DATACORE_ACCEPT_EULA: '1'
@@ -1681,6 +1695,34 @@ jobs:
           grep -q 'DATACORE_WORKER_PRIOR_REGISTRY' ~/.datacore/bin/lib/worker.sh \
             || { echo "::error::the upgrade did not install a lib/worker.sh carrying the prune fix"; exit 1; }
           echo "upgraded, and the new helper carries the fix"
+
+      # Printed unconditionally, before the assertion, so a failure arrives with its evidence
+      # rather than needing a second run to collect it.
+      - name: What the upgrade actually saw
+        run: |
+          set -eu
+          h_old=$(cat /tmp/before/data_home)
+          h_new=$(grep '^DATACORE_HOME=' ~/.datacore/current/.env | head -1 | cut -d= -f2-)
+          echo "DATACORE_HOME before : $h_old"
+          echo "DATACORE_HOME after  : $h_new"
+          [ "$h_old" = "$h_new" ] || echo "::warning::DATACORE_HOME moved across the upgrade, so the mirror prune reads is not the one the old install wrote"
+          echo "bundle dir before    : $(cat /tmp/before/bundle_dir)"
+          echo "bundle dir after     : $(readlink -f ~/.datacore/current)"
+          echo "mirror path after    : $h_new/runtime/worker-registry.json"
+          test -s "$h_new/runtime/worker-registry.json" && echo "mirror after exists  : yes" || echo "mirror after exists  : NO"
+          echo "--- what the installer's worker step printed ---"
+          grep -iE "worker|prune|registry" new.log | head -12 || true
+          echo "--- registry now ---"
+          python3 -c "
+          import json, os
+          ws = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          for w in ws: print(' ', w.get('agent_id'), w.get('cli'), w.get('phases'))" || true
+          echo "--- catalogue now ---"
+          python3 -c "
+          import json, os
+          p = os.path.expanduser('~/.datacore/current/generated/azure-worker-catalogue.json')
+          ws = json.load(open(p))['workers'] if os.path.exists(p) else []
+          print(' ', len(ws), 'entries:', sorted({(w.get('agent_id') or '').split('@')[0] for w in ws}))" || true
 
       - name: The worker you chose is still there
         run: |
