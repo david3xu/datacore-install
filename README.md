@@ -183,6 +183,10 @@ is still there.
 
 ### Workers
 
+> **Per-CLI detail, and which models to put behind them:**
+> [docs/CLI-AND-MODELS.md](docs/CLI-AND-MODELS.md) — what each CLI can and cannot do, how to run an
+> open-weight model locally, and measured throughput for a 30 B model on Apple Silicon.
+
 A worker is an AI coding CLI that Datacore dispatches work to. Datacore knows 29 combinations of
 CLI × model × role, which is far more than anyone wants enabled — and far more credentials than
 anyone wants minted. So the installer mints a token only for the lean set it enables: **one
@@ -301,6 +305,12 @@ datacore worker add codex
 
 Either way, nothing is accepted until a real round trip succeeds. A key or CLI that cannot
 actually answer is reported as a failure, not saved as configuration.
+
+**A provider is not a worker.** `provider add` stores a key Datacore calls itself; `worker add`
+enables a CLI Datacore dispatches tasks to. Adding a provider leaves `worker list` unchanged, and
+work is only ever dispatched to workers. See
+[docs/CLI-AND-MODELS.md](docs/CLI-AND-MODELS.md) for the full comparison, a third route (running an
+open-weight model locally behind `provider add local`), and which model suits which role.
 
 ## Uninstalling
 
