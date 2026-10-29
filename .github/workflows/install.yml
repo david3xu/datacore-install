@@ -1773,36 +1773,6 @@ jobs:
               raise SystemExit(1)
           PY
 
-      # A worker the user REMOVED must not come back. This is the error the recovery can make in
-      # the other direction: the outgoing version directory still lists agy with phases, so a
-      # recovery that trusts it would resurrect a choice the user had reversed. Reinstalling is
-      # the cheapest way to run prune again against that same prior directory.
-      - name: A worker you removed stays removed
-        env:
-          DATACORE_ACCEPT_EULA: '1'
-          DATACORE_WORKER_DEBUG: '1'
-        run: |
-          set -eu
-          export PATH="$HOME/bin:$PATH"
-          ~/.datacore/bin/datacore worker remove agy > rm.log 2>&1 || { cat rm.log; exit 1; }
-          cat rm.log
-          sh install.sh > again.log 2>&1 || { cat again.log; exit 1; }
-          grep -aiE "\[debug\]|recovered|worker\(s\) enabled" again.log | head -20 || true
-          python3 - <<'PY'
-          import json, os, sys
-          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
-          agy = [w['agent_id'] for w in reg if (w.get('agent_id') or '').startswith('agy') and w.get('phases')]
-          print("agy workers after remove + reinstall:", agy)
-          if agy:
-              print("::error::a reinstall resurrected the agy worker the user had removed -- "
-                    "the recovery is over-restoring from the previous version directory", file=sys.stderr)
-              raise SystemExit(1)
-          cat = os.path.expanduser('~/.datacore/current/generated/azure-worker-catalogue.json')
-          ids = {w['agent_id']: bool(w.get('token')) for w in (json.load(open(cat))['workers'] if os.path.exists(cat) else [])}
-          print("agy identity kept in the catalogue for a later re-add:",
-                {k: v for k, v in ids.items() if k.startswith('agy')})
-          PY
-
       - name: And the upgraded install is healthy
         run: |
           set -eu
@@ -1813,3 +1783,72 @@ jobs:
             echo "::error::the upgraded install has failing checks:"; printf '%s\n' "$fails"; exit 1
           fi
           echo "the chosen worker survived the upgrade and the install is healthy"
+
+      # A worker the user REMOVED must not come back. This is the error the recovery can make in
+      # the other direction: the outgoing version directory still lists agy with phases, so a
+      # recovery that trusts that directory over the user's choice resurrects a reversed decision.
+      #
+      # This runs prune the way install.sh runs it, rather than by reinstalling: `lean_workers()`
+      # in install.sh is one invocation of this helper with DATACORE_INSTALL_ROOT and DATACORE_HOME
+      # set, and that is reproduced exactly below. A third full install in this job timed out
+      # waiting for Coordinator readiness -- `worker remove` restarts the Coordinator and the
+      # reinstall raced it -- which tested the container stack, not the choice. The install-path
+      # hazard that needed a real install (the mirror being regenerated before prune) is covered by
+      # the assertion above, which does upgrade for real.
+      - name: A worker you removed stays removed
+        env:
+          DATACORE_WORKER_DEBUG: '1'
+        run: |
+          set -eu
+          export PATH="$HOME/bin:$PATH"
+          ~/.datacore/bin/datacore worker remove agy > rm.log 2>&1 || { cat rm.log; exit 1; }
+          cat rm.log
+
+          state=$(grep '^DATACORE_HOME=' ~/.datacore/current/.env | head -1 | cut -d= -f2-)/worker-state.json
+          test -s "$state" || { echo "::error::no choices file at $state after a remove"; exit 1; }
+          python3 - "$state" <<'PY'
+          import json, sys
+          chosen = json.load(open(sys.argv[1]))['chosen']
+          print("chosen families after the remove:", chosen)
+          if any(f.startswith('agy') for f in chosen):
+              print("::error::the choices file still lists agy after `worker remove agy`", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
+          # Exactly install.sh's lean_workers() invocation.
+          DATACORE_INSTALL_ROOT="$HOME/.datacore" \
+          DATACORE_HOME="$(grep '^DATACORE_HOME=' ~/.datacore/current/.env | head -1 | cut -d= -f2-)" \
+            sh ~/.datacore/bin/lib/worker.sh prune > again.log 2>&1 || { cat again.log; exit 1; }
+          cat again.log
+
+          python3 - <<'PY'
+          import json, os, sys
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          agy = [w['agent_id'] for w in reg if (w.get('agent_id') or '').startswith('agy') and w.get('phases')]
+          print("agy workers after remove + prune:", agy)
+          if agy:
+              print("::error::prune resurrected the agy worker the user had removed -- the recovery "
+                    "is over-restoring from the previous version directory", file=sys.stderr)
+              raise SystemExit(1)
+          cat = os.path.expanduser('~/.datacore/current/generated/azure-worker-catalogue.json')
+          ids = {w['agent_id']: bool(w.get('token')) for w in (json.load(open(cat))['workers'] if os.path.exists(cat) else [])}
+          kept = {k: v for k, v in ids.items() if k.startswith('agy')}
+          print("agy identity kept for a later re-add:", kept)
+          if not kept or not all(kept.values()):
+              print("::error::removing a worker discarded its provisioned token, so re-adding it "
+                    "would have to mint a new identity", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
+      # The carrier itself: a path under $DATACORE_HOME that no part of the bundle rewrites, and it
+      # holds tokens, so it must not be group- or world-readable.
+      - name: The choices file is where it has to be, and is not readable by others
+        run: |
+          set -eu
+          state=$(grep '^DATACORE_HOME=' ~/.datacore/current/.env | head -1 | cut -d= -f2-)/worker-state.json
+          case "$state" in
+            *"/runtime/"*) echo "::error::the choices file is inside the directory the bundle regenerates"; exit 1 ;;
+          esac
+          mode=$(stat -c '%a' "$state")
+          echo "choices file: $state (mode $mode)"
+          [ "$mode" = 600 ] || { echo "::error::the choices file carries tokens and is mode $mode"; exit 1; }
