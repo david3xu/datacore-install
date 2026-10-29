@@ -102,9 +102,22 @@ jobs:
           # excluded because the bundle's own catalogue flags it out of the default profile.
           assert dispatch == ['claude-review@opus', 'claude-worker@sonnet'], dispatch
           assert len(identity) == 1, identity
-          assert len(cat) >= 29, len(cat)
+
+          # The catalogue holds every worker a token was actually minted for -- not every worker
+          # that exists. `len(cat) >= 29` used to assert the opposite, because the old way to enable
+          # an unprovisioned worker was DATACORE_LOCAL_FULL_WORKER_REGISTRY=1, which re-minted all
+          # 29 catalogued identities to use one of them. lib/worker.sh now asks the Runtime for a
+          # single credential on demand, so a stock install mints 5 and 29 pre-minted credentials
+          # for workers nobody enabled is the thing that was fixed, not a thing to assert.
+          #
+          # What has to stay true is the relationship: nothing enabled may be missing from the
+          # catalogue, or removing it would strand a worker whose token cannot be given back.
+          cat_ids = {w['agent_id'] for w in cat}
+          reg_ids = {w['agent_id'] for w in reg}
+          missing = sorted(reg_ids - cat_ids)
+          assert not missing, f'enabled but absent from the catalogue: {missing}'
           assert all('token' in w for w in cat), 'a catalogue entry lost its token'
-          print(f'enabled {dispatch}, catalogue holds {len(cat)}')
+          print(f'enabled {dispatch}, catalogue holds {len(cat)} minted worker(s)')
           PY
 
       # Enabled is not the same as reachable. The Coordinator dispatches from executor profiles,
@@ -176,8 +189,26 @@ jobs:
           got = sorted(w['agent_id'] for w in reg if w.get('phases'))
           assert got == ['claude-review@opus', 'claude-worker@sonnet', 'codex-worker@gpt-6-luna'], got
           print('after remove:', got)"
-          # A removal must never destroy a token: the catalogue still has to be able to give it back.
+          # A removal must never destroy a token: the catalogue still has to be able to give it
+          # back. This is the assertion the `len(cat) >= 29` check was standing in for, so it is
+          # checked rather than merely exercised -- the add below used to be the last line of the
+          # step, and a re-add that silently minted a *different* credential would have passed.
+          python3 -c "
+          import json, os
+          cat = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-catalogue.json')))['workers']
+          before = {w['agent_id']: w['token'] for w in cat}
+          json.dump(before, open('/tmp/tokens-before.json', 'w'))
+          assert 'codex-review@gpt-6-astra' in before, sorted(before)
+          print('token retained in the catalogue after removal')"
           ~/.datacore/bin/datacore worker add codex-review@gpt-6-astra
+          python3 -c "
+          import json, os
+          before = json.load(open('/tmp/tokens-before.json'))
+          reg = json.load(open(os.path.expanduser('~/.datacore/current/generated/azure-worker-registry.json')))['workers']
+          now = {w['agent_id']: w.get('token') for w in reg}
+          got, want = now.get('codex-review@gpt-6-astra'), before['codex-review@gpt-6-astra']
+          assert got == want, 're-adding the worker minted a different credential'
+          print('re-add returned the same credential')"
 
       - name: doctor reports nothing blocking
         run: |
