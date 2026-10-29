@@ -1039,31 +1039,44 @@ jobs:
       # The walkthrough names three failures and tells the reader they are expected. If the real
       # set differs -- more, fewer, or different names -- the table in the README is wrong and a
       # new user is either alarmed by an unlisted failure or told to ignore one that matters.
-      - name: doctor fails on exactly the three the README tells the reader to expect
+      # The README tells a new user that a clean machine reports no failures and that the launcher
+      # checks are *skipped* rather than failed, because a machine without an AI CLI is not a broken
+      # machine. That is the claim most likely to scare someone off, so it is the one measured here.
+      #
+      # An earlier version of this check asserted three FAILs instead, taken from a v0.1.78 install
+      # log. 0.1.79 skips them. The assertion was wrong and the README built on it was wrong; the
+      # "parsed no FAIL names" guard below is what caught it, so it stays.
+      - name: A clean machine reports no failures, and skips the launchers
         run: |
           set -eu
           ~/.datacore/bin/datacore doctor > doctor.log 2>&1 || true
-          # Unanchored, like the other doctor checks in this file: the status line may carry a
-          # leading glyph or indent, and anchoring on it would silently match nothing -- a check
-          # that compares two empty sets and passes.
-          # Keep only tokens shaped like a check name (`group:check`). Matching ' FAIL ' alone also
-          # catches prose that happens to contain the word, which would make the comparison below
-          # fail against sentences instead of checks.
-          got=$(grep ' FAIL ' doctor.log | sed -E 's/.* FAIL ([A-Za-z0-9_:.-]+).*/\1/' | grep -E '^[a-z_]+:' | sort -u)
-          test -n "$got" || { echo "::error::parsed no FAIL names out of doctor's output; the format changed"; cat doctor.log; exit 1; }
-          want=$(printf '%s\n' bridge_dispatch:launcher:claude bridge_dispatch:launcher:codex executor_config:has_entries | sort)
-          echo "doctor failures on a clean machine:"; printf '%s\n' "$got" | sed 's/^/  /'
-          if [ "$got" != "$want" ]; then
-            echo "::error::the README's expected-failure table is out of date"
-            diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true
+          tail -1 doctor.log
+
+          # Unanchored like the other doctor checks here: the status line carries a leading glyph,
+          # and anchoring on it would match nothing and pass. Keep only `group:check` tokens, so
+          # prose containing the word is not mistaken for a check name.
+          fails=$(grep ' FAIL ' doctor.log | sed -E 's/.* FAIL ([A-Za-z0-9_:.-]+).*/\1/' | grep -E '^[a-z_]+:' | sort -u || true)
+          if [ -n "$fails" ]; then
+            echo "::error::the README says a clean install has no failures; doctor reported:"
+            printf '%s\n' "$fails"
             exit 1
           fi
-          for name in $got; do
-            grep -q "$name" README.md || { echo "::error::$name fails on a clean install and is not in the README's table"; exit 1; }
-          done
-          echo "all three are named in the README"
 
-      - name: Install a CLI, then `worker add` clears all three — the walkthrough's step 4
+          # A summary line must exist, or the two checks above passed against an empty file.
+          grep -qE 'summary: [0-9]+ ok, 0 fail' doctor.log \
+            || { echo "::error::no 'N ok, 0 fail' summary in doctor's output"; cat doctor.log; exit 1; }
+
+          skips=$(grep ' SKIP ' doctor.log | sed -E 's/.* SKIP ([A-Za-z0-9_:.-]+).*/\1/' | grep -E '^[a-z_]+:' | sort -u)
+          echo "skipped on a clean machine:"; printf '%s\n' "$skips" | sed 's/^/  /'
+          for want in bridge_dispatch:launcher:claude bridge_dispatch:launcher:codex; do
+            printf '%s\n' "$skips" | grep -qxF "$want" \
+              || { echo "::error::the README says $want is skipped on a clean machine; it was not"; exit 1; }
+            grep -qF "$want" README.md \
+              || { echo "::error::$want is skipped on a clean install and the README does not mention it"; exit 1; }
+          done
+          echo "no failures, launchers skipped, and the README says so"
+
+      - name: Install a CLI, then `worker add` turns its launcher check OK — step 4
         run: |
           set -eu
           mkdir -p ~/bin ~/stub
@@ -1095,13 +1108,19 @@ jobs:
           test "$n" -ge 1 || { echo "::error::worker add enabled nothing, so the walkthrough's step 4 is wrong"; exit 1; }
 
           ~/.datacore/bin/datacore doctor > doctor2.log 2>&1 || true
-          still=$(grep ' FAIL ' doctor2.log | sed -E 's/.* FAIL ([A-Za-z0-9_:.-]+).*/\1/' | grep -E '^[a-z_]+:' | grep -vE 'launcher:codex' | sort -u || true)
-          if [ -n "$still" ]; then
-            echo "::error::the README says worker add clears these, and it did not:"
-            printf '%s\n' "$still"
-            exit 1
+          tail -1 doctor2.log
+
+          # The README's step 4 promises this exact transition, so assert the transition and not
+          # merely the absence of failures -- a doctor that stopped running the check at all would
+          # also produce "no failures".
+          grep -qE ' OK +bridge_dispatch:launcher:claude' doctor2.log \
+            || { echo "::error::step 4 says the claude launcher check becomes OK after worker add; it did not"; grep launcher doctor2.log || true; exit 1; }
+
+          fails=$(grep ' FAIL ' doctor2.log | sed -E 's/.* FAIL ([A-Za-z0-9_:.-]+).*/\1/' | grep -E '^[a-z_]+:' | sort -u || true)
+          if [ -n "$fails" ]; then
+            echo "::error::enabling a worker introduced a failure:"; printf '%s\n' "$fails"; exit 1
           fi
-          echo "worker add cleared the claude launcher and the executor-profile failure"
+          echo "the claude launcher check is OK and nothing started failing"
 
       - name: Mapping a project works before any task exists — the walkthrough's step 5
         run: |

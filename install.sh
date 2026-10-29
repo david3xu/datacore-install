@@ -863,7 +863,11 @@ register_clients() {
       info "could not register with Claude Code"
     fi
   else
-    info "Claude Code not found — run 'datacore connect' after installing it"
+    # Do not name `datacore connect` here: it is not implemented, and the bundle's own
+    # connect-claude-code.sh writes a *project-scoped* entry keyed to the current directory,
+    # which only works inside whatever folder the user happened to be standing in. Re-running
+    # the installer registers at user scope, which is what the entry has to be.
+    info "Claude Code not found — install it, then re-run this installer to register it"
   fi
 
   if [ -d "$HOME/Library/Application Support/Claude" ] && [ -x "$BUNDLE_DIR/write-claude-desktop-config.sh" ]; then

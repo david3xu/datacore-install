@@ -91,8 +91,8 @@ execution is opt-in and configured later, only if you want it.
 
 ### Your first worker, start to finish
 
-This is the whole path on a machine with no AI CLI yet, which is the usual starting point. Every
-line of output below is what the install actually prints, not a sketch.
+This is the whole path on a machine with no AI CLI yet, which is the usual starting point. The
+output below is measured, not sketched.
 
 **1. Install.** On a clean machine the summary ends like this:
 
@@ -106,21 +106,18 @@ line of output below is what the install actually prints, not a sketch.
 That is a working install. Memory, tasks and search are already usable from an AI client; workers
 are the opt-in part.
 
-**2. Expect `datacore doctor` to report failures at this point, and do not be alarmed by them.**
-The installer says `✓ doctor: no blocking failures (2 optional worker CLI not installed)` while
-`datacore doctor` run by hand says `16 ok, 3 fail, 3 skip`. Both are right and they are describing
-the same machine. The three are:
+**2. Check it.** `datacore doctor` reports **no failures** on that machine:
 
-| Failure | Why, on a clean machine |
-|---|---|
-| `bridge_dispatch:launcher:claude` | `claude` is not on `PATH`, so no claude worker can be launched |
-| `bridge_dispatch:launcher:codex` | same, for `codex` |
-| `executor_config:has_entries` | no workers are enabled yet, so there are no executor profiles to project |
+```
+summary: 18 ok, 0 fail, 6 skip (24 total)
+  · SKIP bridge_dispatch:launcher:claude
+  · SKIP bridge_dispatch:launcher:codex
+  · SKIP bridge_dispatch:launcher:agy
+```
 
-All three clear in step 4. Until then they are the honest description of a machine that cannot
-dispatch yet, not damage. `datacore doctor`'s remediation line for the launchers suggests setting
-`DATACORE_CLAUDE_CODE_BIN` in the bundle `.env`; you do not need to. Putting the CLI on `PATH` is
-enough, and is the supported way.
+The launcher checks are **skipped, not failed** — deliberately, because a machine without an AI CLI
+is not a broken machine, and a diagnostic that shouts about a choice you have not made yet is
+useless. A skip here means "no worker of this kind is enabled, so there is nothing to check".
 
 **3. Install and log into an AI CLI.** Datacore dispatches to the CLI you already use — it does not
 ship one. Install `claude` or `codex`, then **run it once yourself** and confirm it answers.
@@ -132,11 +129,12 @@ will refuse on first use.
 ```bash
 datacore worker add claude     # or: codex
 datacore worker list           # confirm
-datacore doctor                # the three failures above are now gone
+datacore doctor                # bridge_dispatch:launcher:claude moves from SKIP to OK
 ```
 
 Nothing needs reinstalling. `worker add` regenerates the Coordinator's executor profiles and
-restarts the worker bridge for you.
+restarts the worker bridge for you — the two steps that would otherwise leave a worker enabled and
+never dispatched to.
 
 **5. Map a project.** Nothing is dispatched until the task's project points at a repository:
 
@@ -145,8 +143,15 @@ datacore project link my-project ~/Developer/my-repo
 datacore project list
 ```
 
-**6. Restart your AI client** and ask it *"what tasks do I have?"*. If it answers, the MCP
-connection is live and the loop is closed.
+**6. Register your AI client.** If the CLI was not installed when Datacore was, no MCP entry was
+written and the install says so (`MCP  not registered`). Re-run the installer — it is idempotent,
+reuses the installed bundle and registers every AI client it now finds:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.79/install.sh | sh
+```
+
+Then restart the client and ask it *"what tasks do I have?"*. If it answers, the loop is closed.
 
 If something still does not dispatch, the three gates in [Workers](#workers) are the things to
 check, in that order — and all three fail quietly, which is why they are listed there explicitly.

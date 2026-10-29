@@ -149,7 +149,7 @@ case "$verb" in
   update)    run_installer "$@" ;;
   uninstall) run_lib_script uninstall.sh "$@" ;;
 
-  connect)  not_yet connect "Re-run the installer; it registers every AI client it finds." ;;
+  connect)  not_yet connect "Re-run the installer; it registers every AI client it finds, at user scope." ;;
   enable)   not_yet enable  "Workers are turned on with: datacore worker add" ;;
   provider) run_lib_script provider.sh "$@" ;;
   worker)   run_lib_script worker.sh   "$@" ;;
