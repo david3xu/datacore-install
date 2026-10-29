@@ -31,7 +31,7 @@ task.
 | Claude Code | `claude-worker`, `claude-review` | `claude` | implementation, rework, review | yes |
 | Codex | `codex-worker`, `codex-review` | `codex` | implementation, rework, review | yes |
 | AgY | `agy`, `agy-review` | `agy` | implementation, rework, review | **no** — see below |
-| Muse Code | — | `muse` | — | **not dispatchable yet** — see below |
+| Muse Code | `muse-worker`, `muse-review` | `muse` | implementation, rework, review | yes |
 
 `datacore worker add claude` enables one implementation worker and one reviewer for that CLI. The
 family name is what `worker list` prints; the binary is what has to resolve on `PATH`.
@@ -48,46 +48,48 @@ So a dispatched AgY worker **does the work and leaves its task open**. Measured:
 its output file and its task stayed `created`, while the equivalent Codex task reached `completed`.
 Treat AgY as fire-and-forget and keep lifecycle-closing work on Claude or Codex.
 
-### Muse Code is not dispatchable yet
+### Muse Code, and how it differs from the others
 
-Muse Code is a capable coding agent and is the right CLI for Meta models, but **Datacore has no
-Muse launcher**. The bridge's dispatch switch has exactly three cases — `claude-code`, `codex`,
-`agy` — and the capability catalogue the Coordinator selects from is compiled in alongside it.
-Consequences:
-
-- `datacore worker add muse` reports `No worker matches 'muse'`.
-- Hand-writing a `"cli": "muse"` entry into the worker registry is accepted by the file and then
-  fails at dispatch, because no launcher matches it.
-- This cannot be fixed by configuration on a fresh machine. It needs a launcher in the bridge.
-
-**What does work today** is Muse as a provider, and Muse driven by hand:
+Dispatchable from **0.1.80**. Earlier releases have no Muse launcher at all: on 0.1.79 and before,
+`datacore worker add muse` answers `No worker matches 'muse'`, and that cannot be fixed by
+configuration — the catalogue the Coordinator selects from is compiled into the bundle, so it takes
+a release, not a setting.
 
 ```bash
 muse login                                  # account login; no API key needed
-datacore provider add meta                  # if you also want Datacore calling the API directly
-muse exec --model muse-spark-1.3 'your prompt here'
+datacore worker add muse                    # enables muse-worker and muse-review
+datacore report                             # says whether anything is still in the way
 ```
 
-**Adding the launcher is a known-size change, not an open question.** Muse Code already supports
-everything a first-class worker needs — more safely than Codex does:
+Two things about Muse differ from the Claude and Codex launchers, and both are worth knowing
+because they are the reverse of what you might assume.
+
+**It uses the stdio MCP bridge, not the HTTP endpoint.** Muse's HTTP MCP form requires an
+interactive OAuth sign-in, which no unattended dispatch can complete — a worker token is rejected
+there no matter how it is passed. The stdio bridge inherits its credential from the environment
+instead, so that is what the launcher uses.
+
+**Muse refuses inline secret literals.** It accepts only whole-value `${VAR}` references in `-c`
+settings:
 
 ```bash
-# Proven against a live Datacore runtime. With a real token this connects;
-# with a dummy one it fails on the credential, not the wiring.
-DC_TOKEN='Bearer …' muse exec \
-  --workspace /path/to/repo --json --yolo \
+DC_TOKEN='Bearer …' muse exec --workspace /path/to/repo --json --yolo \
   --model muse-spark-1.3 \
-  -c 'mcpServers.datacore={"url":"http://127.0.0.1:43123/mcp","headers":{"Authorization":"${DC_TOKEN}"}}' \
+  -c 'mcpServers.datacore={"headers":{"Authorization":"${DC_TOKEN}"}}' \
   'read your task and do it'
 ```
 
-Note `${DC_TOKEN}`: Muse requires secrets as a whole-value environment reference and **refuses an
-inline literal**, so the token never reaches the command line or a process listing. The Codex `-c`
-form does not enforce that. A Muse worker would therefore be safer than the ones that exist.
+An inline literal is rejected outright. The Codex `-c` form does not enforce that, so a token can
+reach a process listing there and cannot here. On this one point a Muse worker is the safest of the
+four.
 
-A launcher needs: the argv above, per-dispatch MCP config carrying the worker's own agent id and
-tool bundle, catalogue entries with `implementation` and `review` phases, `muse` added to the
-CLI→binary map so `worker add muse` resolves, and a `bridge_dispatch:launcher:muse` doctor check.
+**What is proven, and what is not.** CI installs from the README's one-liner on a clean runner and
+asserts the whole path: the launcher check skipped with nothing enabled, failing when a worker is
+enabled and the binary is absent, OK once it resolves, the registry entry carrying `cli: muse` with
+real phases, and the worker surviving a reinstall. It does **not** prove that a Meta model answered
+— a real `muse` needs `muse login` against an account, and that credential does not belong in
+public CI, so the job uses a stub binary. The end-to-end hop is verified by hand on a logged-in
+machine; the argv the launcher builds is covered by unit tests in the platform repo.
 
 ## Three things gate dispatch, whichever CLI
 
