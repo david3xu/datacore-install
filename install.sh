@@ -749,6 +749,55 @@ mcp_bundle_works() {
   return $_mrc
 }
 
+# An identity resolves to exactly ONE MCP tool bundle, so the Claude Code slot cannot be both the
+# interactive front door and the lifecycle recovery operator. The bundle names it for recovery on
+# purpose -- without that, nothing holds lifecycle_operator and a stuck review has no actor
+# permitted to give it a verdict -- which left the interactive client refused every front_door
+# planning tool.
+#
+# The bundle now mints a second, front-door identity for the slot, but only when it writes its
+# configuration, and it writes that only when .env is absent. Reinstalling the SAME version reuses
+# the existing bundle directory, so .env is already there, the config step is skipped, and the new
+# identity never appears. This fills that gap, which is the installer's job anyway: it already owns
+# DATACORE_HOME and the worker project map for the same reason.
+#
+# Derivation matches the platform's: drop the recovery segment. An id that carries none already
+# resolves to front_door, so there is nothing to derive and nothing to do.
+ensure_front_door_identity() {
+  _cc=$(grep '^DATACORE_CLAUDE_CODE_AGENT_ID=' "$BUNDLE_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+  [ -n "$_cc" ] || return 0
+  _fd=$(grep '^DATACORE_CLAUDE_CODE_FRONT_DOOR_AGENT_ID=' "$BUNDLE_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2-)
+  if [ -z "$_fd" ]; then
+    _fd=$(printf '%s' "$_cc" | sed -E 's/(^|-)(lifecycle|recovery)-operator-/\1/g')
+    [ "$_fd" != "$_cc" ] || return 0
+    printf 'DATACORE_CLAUDE_CODE_FRONT_DOOR_AGENT_ID=%s\n' "$_fd" >> "$BUNDLE_DIR/.env"
+    info "added a front-door identity for Claude Code: $_fd"
+  fi
+
+  grep -q '^CLAUDE_CODE_FRONT_DOOR_TOKEN=' "$tokens" 2>/dev/null && return 0
+
+  # Mint it through the Runtime CLI in the running stack, the same call and scopes the bundle uses.
+  # The value is piped straight into the tokens file: putting a bearer token in a shell variable or
+  # on a command line is how it ends up in a process listing or a shell history.
+  _mint="${TMPDIR:-/tmp}/datacore-mint.$$"
+  if ! (cd "$BUNDLE_DIR" && docker compose -f docker-compose.yml exec -T runtime \
+          /app/datacore agent-create --agent-id "$_fd" \
+          --scopes 'events:read,events:write,facts:read,tasks:read,tasks:write') >"$_mint" 2>&1; then
+    info "could not mint the front-door token; Claude Code keeps the recovery bundle"
+    rm -f "$_mint"; return 0
+  fi
+  sed -n 's/.*"token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/CLAUDE_CODE_FRONT_DOOR_TOKEN=\1/p' \
+    "$_mint" >> "$tokens"
+  rm -f "$_mint"
+  if grep -q '^CLAUDE_CODE_FRONT_DOOR_TOKEN=' "$tokens"; then
+    printf 'CLAUDE_CODE_FRONT_DOOR_AGENT_ID=%s\n' "$_fd" >> "$tokens"
+    chmod 600 "$tokens" 2>/dev/null || true
+    ok "minted a front_door identity for Claude Code"
+  else
+    info "the Runtime CLI returned no token; Claude Code keeps the recovery bundle"
+  fi
+}
+
 register_clients() {
   if [ "${DATACORE_SKIP_CLIENT_REGISTRATION:-0}" = 1 ]; then
     info "skipping client registration (DATACORE_SKIP_CLIENT_REGISTRATION)"
@@ -756,6 +805,9 @@ register_clients() {
   fi
   tokens="$BUNDLE_DIR/generated/client-tokens.env"
   [ -f "$tokens" ] || { info "no client tokens generated; skipping client registration"; return; }
+
+  ensure_front_door_identity
+
   # shellcheck disable=SC1090
   set -a; . "$tokens"; set +a
 
@@ -772,9 +824,13 @@ register_clients() {
   # "trusted lifecycle recovery operator tools for stuck review, wake, and closure repair".
   # Trying the recovery bundle first registered the client with it whenever it was permitted,
   # and the planning tools then came back "not granted" with no hint why.
+  # Prefer the front-door identity's token when one was minted; it is the only one that can be
+  # granted front_door. CLAUDE_CODE_TOKEN belongs to the recovery identity.
+  CC_TOKEN="${CLAUDE_CODE_FRONT_DOOR_TOKEN:-$CLAUDE_CODE_TOKEN}"
+
   BUNDLE=''
   for candidate in front_door lifecycle_operator; do
-    if mcp_bundle_works "$CLAUDE_CODE_TOKEN" "$candidate"; then BUNDLE="$candidate"; break; fi
+    if mcp_bundle_works "$CC_TOKEN" "$candidate"; then BUNDLE="$candidate"; break; fi
   done
   [ -n "$BUNDLE" ] && ok "verified MCP access (bundle: $BUNDLE)" \
                    || { info "no tool bundle this identity may use; skipping registration"; return; }
@@ -797,7 +853,7 @@ register_clients() {
     claude mcp remove datacore -s user >/dev/null 2>&1 || true
     # This one token does reach argv: `claude mcp add` accepts the header only as an argument.
     if claude mcp add --transport http --scope user datacore "$RUNTIME_URL/mcp" \
-         --header "Authorization: Bearer $CLAUDE_CODE_TOKEN" \
+         --header "Authorization: Bearer $CC_TOKEN" \
          --header "X-Datacore-MCP-Tool-Bundle: $BUNDLE" >/dev/null 2>&1 &&
        # `mcp add` exiting 0 is not the same as an entry existing: it is scope- and
        # cwd-sensitive, so read it back rather than trusting the exit status.
