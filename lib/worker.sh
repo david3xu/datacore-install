@@ -505,6 +505,35 @@ catalogue.workers = catalogue.workers || [];
 {
   const byId = new Map(catalogue.workers.map((w) => [w.agent_id, w]));
   for (const w of registry.workers) if (!byId.has(w.agent_id)) byId.set(w.agent_id, w);
+
+  // And whatever the previous install had. Both the registry and the catalogue live in
+  // $ROOT/current/generated, which belongs to the *versioned* bundle directory, so an upgrade
+  // starts with neither: the catalogue is reseeded from the new bundle's minted set alone.
+  //
+  // That set is small. The bundle mints claude-code and codex only; `worker add agy` and
+  // `worker add muse` PROVISION an identity, token and all, that no later bundle re-mints. So
+  // after an upgrade those identities existed nowhere the code looked, and `prune` -- which
+  // iterates the catalogue -- could not keep a family that was no longer in it. Measured on a
+  // real 0.1.79 -> 0.1.80 upgrade: the catalogue came back with 5 entries, none of them agy,
+  // and the agy worker the user had enabled was dropped whatever the predicate said.
+  //
+  // The mirror under $DATACORE_HOME is outside the bundle and carries the full entry, including
+  // the token, so it is the one place a provisioned identity survives. Merge it back in.
+  const priorRegistryPath = process.env.DATACORE_WORKER_PRIOR_REGISTRY || "";
+  let recovered = 0;
+  if (priorRegistryPath && existsSync(priorRegistryPath)) {
+    try {
+      for (const w of read(priorRegistryPath).workers || []) {
+        if (!w || !w.agent_id || byId.has(w.agent_id)) continue;
+        byId.set(w.agent_id, w);
+        recovered += 1;
+      }
+    } catch {
+      // Unreadable prior registry: carry nothing forward rather than fail an install.
+    }
+  }
+  if (recovered) console.log(`  recovered ${recovered} worker identity/identities from the previous install`);
+
   catalogue.workers = [...byId.values()];
   if (cataloguePath) write(cataloguePath, catalogue);
 }
