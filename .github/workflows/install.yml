@@ -338,9 +338,16 @@ jobs:
           # alternatives to grep, so a single `grep -qx "$cli"` passes as soon as any one entry
           # matches -- it reads like a check and tests almost nothing. -F keeps a filename's dot
           # from matching any character.
+          # Required and optional, split the way install.sh itself splits them. `datacore` is the
+          # dispatcher and the archives are the product, so a release without one of those is
+          # broken. The lib/ helpers back one verb each, and install.sh is served from main, so it
+          # can legitimately name a helper a release does not carry yet -- it reports "this release
+          # does not carry <name>" and finishes an install whose stack is already up. A check that
+          # fails on that case contradicts the installer it is checking: adding `datacore report`
+          # to CLI_FILES turned this job red while every real install kept working. So report the
+          # lag, name the fix, and keep failing on anything a user genuinely cannot do without.
           missing=""
-          printf 'datacore-local-edition-amd64.tar.gz\ndatacore-local-edition-arm64.tar.gz\nSHA256SUMS\n%s\n' \
-            "$cli" > /tmp/want.txt
+          printf 'datacore-local-edition-amd64.tar.gz\ndatacore-local-edition-arm64.tar.gz\nSHA256SUMS\ndatacore\n' > /tmp/want.txt
           while IFS= read -r want; do
             test -n "$want" || continue
             printf '%s\n' "$names" | grep -qxF "$want" || missing="$missing $want"
@@ -348,6 +355,19 @@ jobs:
           if [ -n "$missing" ]; then
             echo "::error::$pinned is missing:$missing"
             exit 1
+          fi
+
+          lagging=""
+          printf '%s\n' "$cli" | while IFS= read -r want; do
+            test -n "$want" || continue
+            case "$want" in datacore) continue ;; esac
+            printf '%s\n' "$names" | grep -qxF "$want" || printf '%s\n' "$want"
+          done > /tmp/lag.txt
+          lagging=$(tr '\n' ' ' < /tmp/lag.txt)
+          if [ -n "$(printf '%s' "$lagging" | tr -d ' ')" ]; then
+            echo "::warning::$pinned does not carry these helpers named in CLI_FILES: $lagging -- the verbs they back are unavailable on a $pinned install until a release carries them. Cut a release."
+          else
+            echo "every helper CLI_FILES names is attached to $pinned"
           fi
 
           # Every asset the manifest names must hash to what the manifest claims. This is the
@@ -1254,7 +1274,33 @@ jobs:
       # The three states the doctor check distinguishes, in order. Asserting the transitions and
       # not merely "no failures" is the point: a doctor that stopped emitting the check at all
       # would also report no failures.
+      # Everything below this point is a claim about the *bundle*, not about the checkout: the
+      # worker catalogue, the model aliases and the launcher doctor check are all compiled into
+      # the runtime image. install.sh is served from main while the bundle comes from the pinned
+      # release, so this job can run new installer logic against an older bundle -- the lag the
+      # `published` job reports rather than blocks on, because the fix is cutting a release.
+      #
+      # Detect that once, here, and guard each bundle-dependent step on it. An earlier version of
+      # this job guarded only `worker add muse` and asserted the doctor check unconditionally,
+      # which failed against 0.1.79 with "the check was not emitted at all" -- correctly, because
+      # the muse launcher check does not exist in that bundle either. The lesson is that the
+      # boundary is the bundle, not any single command.
+      - name: Does the installed bundle carry the Muse launcher?
+        run: |
+          set -eu
+          bridge=~/.datacore/current/support/host-worker-bridge/src/bridge.js
+          test -f "$bridge" || { echo "::error::no bridge.js in the installed bundle at $bridge"; exit 1; }
+          if grep -q 'muse-worker' "$bridge"; then
+            echo "MUSE_IN_BUNDLE=1" >> "$GITHUB_ENV"
+            echo "the bundle carries the Muse launcher; asserting the full path"
+            grep -o 'muse[a-zA-Z0-9.-]*' "$bridge" | sort -u | sed 's/^/  /'
+          else
+            echo "MUSE_IN_BUNDLE=0" >> "$GITHUB_ENV"
+            echo "::warning::the pinned release's bundle has no Muse launcher, so the muse worker, its model aliases and its doctor check do not exist on this install — cut a release built from a platform tree carrying it. The selector/detector guard above still ran against the checkout."
+          fi
+
       - name: With nothing enabled and no binary, the muse launcher is skipped, not failed
+        if: env.MUSE_IN_BUNDLE == '1'
         run: |
           set -eu
           ~/.datacore/bin/datacore doctor > d1.log 2>&1 || true
@@ -1272,19 +1318,14 @@ jobs:
       # because the fix is cutting a release. Report it that way, and assert the full chain as soon
       # as the release carries it. The static guard above runs against the checkout either way.
       - name: Enabling a muse worker, then installing the CLI, turns the check OK
+        if: env.MUSE_IN_BUNDLE == '1'
         run: |
           set -eu
-          if ! ~/.datacore/bin/datacore worker add muse > add.log 2>&1; then
+          ~/.datacore/bin/datacore worker add muse > add.log 2>&1 || {
             cat add.log
-            if grep -q 'muse' lib/worker.sh; then
-              echo "::warning::the pinned release's bundle has no muse family, so 'worker add muse' is rejected — cut a release built from a platform tree carrying the Muse launcher"
-              echo "MUSE_IN_BUNDLE=0" >> "$GITHUB_ENV"
-              exit 0
-            fi
-            echo "::error::'datacore worker add muse' failed and the checkout has no muse selector either"
+            echo "::error::the bundle carries the Muse launcher and 'datacore worker add muse' still failed"
             exit 1
-          fi
-          echo "MUSE_IN_BUNDLE=1" >> "$GITHUB_ENV"
+          }
           cat add.log
           ~/.datacore/bin/datacore worker list
 
