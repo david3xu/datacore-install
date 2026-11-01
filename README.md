@@ -247,6 +247,34 @@ profiles, which the installer now generates from your registry on every install.
 missing, `datacore doctor` reports `executor_config:file_present` and `datacore worker sync`
 rebuilds them.
 
+### Front doors: any AI client, any model
+
+A *front door* is the AI client you talk to. It reads the briefing, shapes tasks and wakes workers.
+The installer connects Claude Code and Claude Desktop for you. Any other client that runs MCP
+servers can be one too — Muse, Codex, Cursor, a local model's chat app — with whatever model it runs:
+
+```bash
+datacore connect muse --model muse-spark-1.3 --write
+```
+
+That creates a separate identity for the client (`muse-front-door`), so everything it does is
+attributed to it and not to Claude. It also writes one entry into Muse's settings. Start a new Muse
+session and it has the front-door tools. For a client whose settings file isn't known, give the path,
+`--write=<path to settings.json>`, or leave `--write` off to have the entry printed instead.
+
+The entry names a command, never a secret. The client's token stays in a private file
+(`$DATACORE_HOME/front-doors.json`, mode 600) outside the versioned install, so upgrades keep it.
+
+`--model` is a label for `datacore connect list` and nothing more. Datacore never launches a front
+door, so it has no model to check and accepts any. A front door has exactly the same credential
+scopes as a worker. What makes it a front door is the tool bundle its name routes to.
+
+A front door directs workers but does not configure them. It can list workers and wake one for a
+task. Adding, removing or changing a worker's model is `datacore worker`, on the machine itself.
+
+`datacore connect list` shows what is connected; `datacore connect remove <name>` disconnects a
+client and revokes its credential.
+
 ### Starting at login
 
 On macOS the installer registers a login agent, so Datacore is already running the next time you
@@ -291,6 +319,8 @@ act on the right stack.
 | `datacore project link <project> <path>` | map a project to its repository |
 | `datacore worker list` | the workers the runtime will dispatch to |
 | `datacore worker add <name>` | enable a worker CLI, family, or one exact model |
+| `datacore connect <name> [--model M]` | make any AI client a front door, with any model |
+| `datacore connect list` | the front doors connected, and the model each was given |
 | `datacore update` | fetch the latest release and upgrade in place, rolling back on failure |
 | `datacore uninstall` | remove the containers, client entries, login agent and install |
 

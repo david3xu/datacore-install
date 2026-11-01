@@ -122,12 +122,14 @@ Lifecycle:
 Providers:
   provider    configure a model API key (add/list/remove)
 
+Front doors:
+  connect     let any AI client -- with any model -- plan and dispatch through Datacore (add/list/remove)
+
 Workers:
   worker      register a local AI CLI or API provider as a worker (add/list/remove)
   project     map a project to the repository its workers work in (link/list/unlink)
 
 Not yet available:
-  connect     register Datacore with an AI client (the installer does this for you)
   enable      turn on optional feature profiles
 EOF
   exit 0
@@ -151,7 +153,7 @@ case "$verb" in
   update)    run_installer "$@" ;;
   uninstall) run_lib_script uninstall.sh "$@" ;;
 
-  connect)  not_yet connect "Re-run the installer; it registers every AI client it finds, at user scope." ;;
+  connect)  run_lib_script connect.sh "$@" ;;
   enable)   not_yet enable  "Workers are turned on with: datacore worker add" ;;
   provider) run_lib_script provider.sh "$@" ;;
   worker)   run_lib_script worker.sh   "$@" ;;
