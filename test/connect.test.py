@@ -51,6 +51,10 @@ class Fixture:
         (root / "current").symlink_to(current)
         (current / ".env").write_text(f"DATACORE_HOME={self.data}\nDATACORE_HTTP_PORT={port}\n")
         (self.bin / "bun").symlink_to(NODE)
+        self.dcbin = root / "installed" / "bin" / "datacore"
+        self.dcbin.parent.mkdir(parents=True)
+        self.launcher = self.dcbin.parent / "muse-front-door"
+        self.muse_settings = self.home / ".config" / "muse" / "settings.json"
         self.log = root / "runtime-cli.log"
         docker = self.bin / "docker"
         docker.write_text(f"#!{sys.executable}\n" + """import json, os, pathlib, sys
@@ -77,7 +81,7 @@ else:
             "HOME": str(self.home),
             "TMPDIR": str(self.root / "tmp"),
             "DATACORE_INSTALL_ROOT": str(self.root),
-            "DATACORE_BIN_PATH": "/opt/datacore/bin/datacore",
+            "DATACORE_BIN_PATH": str(self.dcbin),
             "CONNECT_TEST_LOG": str(self.log),
         }
         return subprocess.run(["sh", str(SCRIPT), *args], input=stdin, capture_output=True, text=True, env=env, timeout=30)
@@ -158,15 +162,82 @@ class ConnectTest(unittest.TestCase):
         self.assertEqual(doc["theme"], "dark")
         self.assertEqual(doc["mcpServers"]["other"], {"command": "x"})
         self.assertEqual(doc["mcpServers"]["datacore"],
-                         {"command": "/opt/datacore/bin/datacore", "args": ["connect", "serve", "cursor"]})
+                         {"command": str(self.f.dcbin), "args": ["connect", "serve", "cursor"]})
         self.assertNotIn("fixture-secret", settings.read_text())
         self.assertTrue(list(settings.parent.glob("settings.json.bak-*")), "the previous settings must be kept")
 
-    def test_write_without_a_path_targets_muse_settings(self):
+    def test_muse_gets_a_launcher_not_a_global_settings_entry(self):
+        # Datacore also runs Muse as a worker, and a worker run inherits every server in Muse's
+        # settings. Measured: an entry there blocked every Muse worker ("the server name is
+        # reserved") and would hand each one the front door's identity.
         r = self.f.run("muse", "--write")
         self.assertEqual(r.returncode, 0, r.stderr)
-        doc = json.loads((self.f.home / ".config" / "muse" / "settings.json").read_text())
-        self.assertEqual(doc["mcpServers"]["datacore"]["args"], ["connect", "serve", "muse"])
+        self.assertFalse(self.f.muse_settings.exists(), "muse's global settings must not be created")
+        self.assertTrue(os.access(self.f.launcher, os.X_OK), "the launcher must be executable")
+        body = self.f.launcher.read_text()
+        self.assertIn("exec muse -c 'mcpServers.datacore=", body)
+        self.assertNotIn("fixture-secret", body)
+
+    def test_the_launcher_hands_muse_a_well_formed_server_entry(self):
+        self.f.run("muse", "--write")
+        argv_log = self.f.root / "muse-argv.json"
+        fake = self.f.bin / "muse"
+        fake.write_text(f"#!{sys.executable}\nimport json, sys\n"
+                        f"open({str(argv_log)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
+        fake.chmod(0o755)
+        env = {"PATH": f"{self.f.bin}:/usr/bin:/bin", "HOME": str(self.f.home)}
+        r = subprocess.run([str(self.f.launcher), "--resume"], capture_output=True, text=True, env=env, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        argv = json.loads(argv_log.read_text())
+        self.assertEqual(argv[0], "-c")
+        key, _, value = argv[1].partition("=")
+        self.assertEqual(key, "mcpServers.datacore")
+        self.assertEqual(json.loads(value), {"command": str(self.f.dcbin), "args": ["connect", "serve", "muse"]})
+        self.assertEqual(argv[2:], ["--resume"], "the user's own arguments must pass through untouched")
+
+        # `muse exec` takes its own flags after the subcommand, so the server goes after `exec`.
+        r = subprocess.run([str(self.f.launcher), "exec", "--model", "m", "hello"], capture_output=True, text=True, env=env, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        argv = json.loads(argv_log.read_text())
+        self.assertEqual(argv[0], "exec")
+        self.assertEqual(argv[1], "-c")
+        self.assertTrue(argv[2].startswith("mcpServers.datacore="))
+        self.assertEqual(argv[3:], ["--model", "m", "hello"])
+
+    def test_the_entry_an_earlier_version_wrote_is_taken_back(self):
+        self.f.muse_settings.parent.mkdir(parents=True)
+        self.f.muse_settings.write_text(json.dumps({
+            "model": "muse-wonder-1.0",
+            "mcpServers": {"datacore": {"command": str(self.f.dcbin), "args": ["connect", "serve", "muse"]},
+                           "other": {"command": "x"}}}))
+        r = self.f.run("muse", "--write")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        doc = json.loads(self.f.muse_settings.read_text())
+        self.assertNotIn("datacore", doc["mcpServers"])
+        self.assertEqual(doc["mcpServers"]["other"], {"command": "x"})
+        self.assertEqual(doc["model"], "muse-wonder-1.0")
+        self.assertTrue(list(self.f.muse_settings.parent.glob("settings.json.bak-*")))
+
+    def test_a_datacore_server_the_user_configured_is_left_alone(self):
+        self.f.muse_settings.parent.mkdir(parents=True)
+        mine = {"mcpServers": {"datacore": {"command": "/somewhere/else", "args": ["--mine"]}}}
+        self.f.muse_settings.write_text(json.dumps(mine))
+        r = self.f.run("muse", "--write")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(self.f.muse_settings.read_text()), mine)
+
+    def test_writing_muse_global_settings_by_path_is_refused(self):
+        r = self.f.run("muse", f"--write={self.f.muse_settings}")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("worker", r.stderr)
+        self.assertFalse(self.f.muse_settings.exists())
+
+    def test_remove_also_deletes_the_launcher(self):
+        self.f.run("muse", "--write")
+        self.assertTrue(self.f.launcher.exists())
+        r = self.f.run("remove", "muse")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(self.f.launcher.exists())
 
     def test_invalid_settings_are_left_untouched(self):
         settings = self.f.root / "broken.json"

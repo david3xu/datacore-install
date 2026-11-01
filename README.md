@@ -254,13 +254,22 @@ The installer connects Claude Code and Claude Desktop for you. Any other client 
 servers can be one too — Muse, Codex, Cursor, a local model's chat app — with whatever model it runs:
 
 ```bash
-datacore connect muse --model muse-spark-1.3 --write
+datacore connect muse --model muse-wonder-1.0 --write
+muse-front-door
 ```
 
-That creates a separate identity for the client (`muse-front-door`), so everything it does is
-attributed to it and not to Claude. It also writes one entry into Muse's settings. Start a new Muse
-session and it has the front-door tools. For a client whose settings file isn't known, give the path,
-`--write=<path to settings.json>`, or leave `--write` off to have the entry printed instead.
+That gives the client its own identity (`muse-front-door`), so everything it does is attributed to it
+and not to Claude, and writes a small launcher, `muse-front-door`, that starts Muse with the front
+door attached to that one session. Plain `muse` stays an ordinary session.
+
+Muse gets a launcher rather than an entry in its settings because Datacore also runs Muse as a
+worker, and a worker run loads every server in those settings. An entry there would hand each
+autonomous worker the front door's identity, and Muse refuses the worker's own Datacore server when
+a server of that name is already defined, so no Muse worker could run at all. Earlier versions of
+this command wrote that entry; running it again takes the entry back out.
+
+For a client Datacore does *not* run as a worker, `--write=<path to settings.json>` adds the entry to
+its `mcpServers` settings, or leave `--write` off to have the entry printed.
 
 The entry names a command, never a secret. The client's token stays in a private file
 (`$DATACORE_HOME/front-doors.json`, mode 600) outside the versioned install, so upgrades keep it.

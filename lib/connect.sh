@@ -69,9 +69,15 @@ const DATACORE_BIN = process.env.DC_DATACORE_BIN || "datacore";
 const SCOPES = "events:read,events:write,facts:read,tasks:read,tasks:write";
 const TOOL_BUNDLE = "front_door";
 
-// Clients whose settings file is known, for `--write` without a path. Anything else that runs MCP
-// servers from an `mcpServers` map takes the same entry via `--write=<path>`.
-const KNOWN_SETTINGS = { muse: join(homedir(), ".config", "muse", "settings.json") };
+// Clients Datacore also runs as WORKERS must not carry the front door in their global settings. A
+// worker run loads every server those settings define, so it would inherit the front door's identity
+// and tools -- an autonomous worker able to plan and dispatch as the front door. And Muse refuses a
+// run whose `-c` override names a server its settings already define. Measured: the entry this
+// command used to write into Muse's settings blocked every Muse worker with
+//   muse: -c mcpServers.datacore: refusing run: the server name is reserved
+// because the worker bridge injects its own `datacore` server per run. So these clients get a
+// launcher that attaches the front door to one session with `-c`, and settings stay untouched.
+const LAUNCH_CLIENTS = { muse: { cli: "muse", settings: join(homedir(), ".config", "muse", "settings.json") } };
 
 function die(msg) { process.stderr.write(`${msg}\n`); process.exit(1); }
 
@@ -180,6 +186,56 @@ function writeSettings(path, name) {
   return path;
 }
 
+const launcherPath = (name) => join(dirname(DATACORE_BIN), `${name}-front-door`);
+
+function writeLauncher(name) {
+  const client = LAUNCH_CLIENTS[name];
+  const entry = JSON.stringify(entryFor(name));
+  if (entry.includes("'")) die(`The datacore path ${DATACORE_BIN} contains a single quote, so no launcher could quote it safely.`);
+  const path = launcherPath(name);
+  const body = [
+    "#!/bin/sh",
+    `# Start ${client.cli} as a Datacore front door, for this session only. Written by \`datacore connect ${name}\`.`,
+    `# The front door is attached with -c instead of living in ${client.cli}'s settings: Datacore also runs`,
+    `# ${client.cli} as a worker, and a worker run inherits every server those settings define.`,
+    `# A subcommand has to come before its own flags, so \`exec\` takes the server after it.`,
+    `case "\${1:-}" in`,
+    `  exec) shift; exec ${client.cli} exec -c 'mcpServers.datacore=${entry}' "$@" ;;`,
+    "esac",
+    `exec ${client.cli} -c 'mcpServers.datacore=${entry}' "$@"`,
+    "",
+  ].join("\n");
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, body, { mode: 0o755 });
+  chmodSync(tmp, 0o755);
+  renameSync(tmp, path);
+  return path;
+}
+
+// Take back the settings entry an earlier version of this command wrote. Only an entry that is
+// recognisably ours -- it runs `datacore connect serve <name>` -- is removed; a `datacore` server the
+// user configured some other way is theirs and stays.
+function removeOldSettingsEntry(name) {
+  const path = LAUNCH_CLIENTS[name].settings;
+  if (!existsSync(path)) return null;
+  let doc;
+  try { doc = JSON.parse(readFileSync(path, "utf8") || "{}"); } catch { return null; }
+  const e = doc && doc.mcpServers && doc.mcpServers.datacore;
+  const ours = e && typeof e.command === "string" && /(^|\/)datacore$/.test(e.command)
+    && Array.isArray(e.args) && e.args.join(" ") === `connect serve ${name}`;
+  if (!ours) return null;
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "");
+  copyFileSync(path, `${path}.bak-${stamp}`);
+  delete doc.mcpServers.datacore;
+  if (!Object.keys(doc.mcpServers).length) delete doc.mcpServers;
+  const mode = statSync(path).mode & 0o777;
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(doc, null, 2) + "\n", { mode });
+  renameSync(tmp, path);
+  return path;
+}
+
 function printConfig(name) {
   const entry = { mcpServers: { datacore: entryFor(name) } };
   console.log("");
@@ -187,8 +243,8 @@ function printConfig(name) {
   console.log("");
   for (const line of JSON.stringify(entry, null, 2).split("\n")) console.log(`    ${line}`);
   console.log("");
-  if (KNOWN_SETTINGS[name]) console.log(`  Or let this write it: datacore connect ${name} --write`);
-  else console.log(`  Or let this write it: datacore connect ${name} --write=<path to the client's settings.json>`);
+  console.log(`  Or let this write it: datacore connect ${name} --write=<path to the client's settings.json>`);
+  console.log("  Not for a client Datacore also runs as a worker: its worker runs would inherit the front door.");
   console.log("  Then start a new session in the client: MCP servers load when a session starts.");
 }
 
@@ -213,10 +269,19 @@ if (cmd === "add") {
   }
   const agentId = agentIdFor(name);
   let settingsPath = null;
-  if (write === true) {
-    settingsPath = KNOWN_SETTINGS[name] || die(`No known settings file for '${name}'. Give one: --write=<path to the client's settings.json>`);
+  const launch = Boolean(LAUNCH_CLIENTS[name]);
+  if (write === true && !launch) {
+    die(`No known settings file for '${name}'. Give one: --write=<path to the client's settings.json>`);
   } else if (typeof write === "string") {
-    settingsPath = write;
+    const target = write.replace(/^~(?=\/)/, homedir());
+    for (const [cname, c] of Object.entries(LAUNCH_CLIENTS)) {
+      if (target === c.settings) {
+        die(`${target} is ${c.cli}'s global settings, and Datacore also runs ${c.cli} as a worker: every worker run would\n` +
+            `  inherit the front door's identity and tools, and ${c.cli} refuses the worker's own datacore server.\n` +
+            `  Use: datacore connect ${cname} --write   (it creates a launcher that attaches the front door per session)`);
+      }
+    }
+    settingsPath = target;
   }
   const doc = load();
   const had = doc.front_doors[name];
@@ -229,7 +294,14 @@ if (cmd === "add") {
     save(doc);
     console.log(`  connected ${name}, as ${agentId}${model ? ` (model: ${model})` : ""}`);
   }
-  if (settingsPath) {
+  if (write === true && launch) {
+    const path = writeLauncher(name);
+    const cleaned = removeOldSettingsEntry(name);
+    console.log(`  wrote ${path}`);
+    if (cleaned) console.log(`  removed the datacore entry an earlier version wrote into ${cleaned} (the previous file is kept as a .bak)`);
+    console.log(`  Start ${LAUNCH_CLIENTS[name].cli} as the front door with: ${path}`);
+    console.log(`  Plain \`${LAUNCH_CLIENTS[name].cli}\` stays an ordinary session, and Datacore's ${LAUNCH_CLIENTS[name].cli} workers are unaffected.`);
+  } else if (settingsPath) {
     writeSettings(settingsPath, name);
     console.log(`  wrote the datacore entry into ${settingsPath} (the previous file is kept as a .bak)`);
     console.log("  Start a new session in the client: MCP servers load when a session starts.");
@@ -268,7 +340,11 @@ if (cmd === "remove") {
   }
   delete doc.front_doors[name];
   save(doc);
-  console.log(`  removed ${name}${revoked ? ", and revoked its credential" : ""}`);
+  let launcherGone = false;
+  if (LAUNCH_CLIENTS[name] && existsSync(launcherPath(name))) {
+    try { require("fs").unlinkSync(launcherPath(name)); launcherGone = true; } catch { /* reported below */ }
+  }
+  console.log(`  removed ${name}${revoked ? ", and revoked its credential" : ""}${launcherGone ? `, and ${launcherPath(name)}` : ""}`);
   if (!revoked) {
     console.log(`  The Runtime could not be reached, so ${had.agent_id} still holds a valid credential there.`);
     console.log("  Once Datacore is running, revoke it from the bundle directory with:");
@@ -349,8 +425,8 @@ usage() {
 datacore connect — let any AI client be a front door to Datacore
 
   datacore connect <name> [--model <model>]    connect a client, and show the entry its settings need
-      --write                                   write that entry into a known client's settings (muse)
-      --write=<settings.json>                   ... or into any client's mcpServers settings file
+      --write                                   muse: create muse-front-door, which starts a front-door session
+      --write=<settings.json>                   another client: add the entry to its mcpServers settings
   datacore connect list                        the clients connected, and the model each was given
   datacore connect remove <name>               disconnect a client and revoke its credential
   datacore connect serve <name>                the MCP server a client runs (named in its settings)
@@ -359,7 +435,8 @@ A front door is the AI client you talk to: it reads the briefing, shapes tasks a
 Any client that runs MCP servers can be one, with any model it supports. Workers -- the CLIs that do
 the work -- are configured separately, with: datacore worker
 
-  datacore connect muse --model muse-spark-1.3 --write
+  datacore connect muse --model muse-wonder-1.0 --write
+  muse-front-door
 EOF
 }
 
