@@ -24,7 +24,7 @@ set -eu
 # software, and nothing recorded which. An installer fetched at a tag now installs the
 # bundle from that same tag, so a command that worked once works the same way forever.
 # Release tooling rewrites this line; `latest` remains available on request.
-PINNED_RELEASE="v0.1.84"
+PINNED_RELEASE="v0.1.85"
 VERSION="${DATACORE_VERSION:-$PINNED_RELEASE}"
 RELEASE_BASE="${DATACORE_RELEASE_BASE:-https://github.com/david3xu/datacore-install/releases}"
 INSTALL_ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
