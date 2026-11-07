@@ -8,7 +8,7 @@ This repository holds the installer and documentation. **It contains no Datacore
 ## Install
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.86/install.sh &&
+curl -fsSLO https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.87/install.sh &&
 sh install.sh
 ```
 
@@ -24,7 +24,7 @@ acceptance explicitly before piping the installer:
 
 ```bash
 export DATACORE_ACCEPT_EULA=1
-curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.86/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.87/install.sh | sh
 ```
 
 ## What you need first
@@ -112,7 +112,7 @@ are the opt-in part.
 **2. Check it.** `datacore doctor` reports **no failures** on that machine:
 
 ```
-summary: 18 ok, 0 fail, 6 skip (24 total)
+summary: 18 ok, 0 fail, 0 warn, 6 skip (24 total)
   · SKIP bridge_dispatch:launcher:claude
   · SKIP bridge_dispatch:launcher:codex
   · SKIP bridge_dispatch:launcher:agy
@@ -151,7 +151,7 @@ written and the install says so (`MCP  not registered`). Re-run the installer �
 reuses the installed bundle and registers every AI client it now finds:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.86/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.87/install.sh | sh
 ```
 
 Then restart the client and ask it *"what tasks do I have?"*. If it answers, the client connection
