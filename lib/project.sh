@@ -42,7 +42,7 @@ find_bun() {
 is_git_repo() {
   [ -d "$1" ] || return 1
   if command -v git >/dev/null 2>&1; then
-    git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1
+    [ "$(git -C "$1" rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ]
   else
     [ -e "$1/.git" ]
   fi
@@ -213,29 +213,69 @@ check_no_single_quote() {
 # .env does nothing until the bridge is restarted. Lifted from `datacore worker`, which has the
 # same obligation, including its reason for not trusting "a bridge is running" as proof.
 
+bridge_port() {
+  _p=""
+  if [ -f "$ENV_FILE" ]; then
+    _val=$(grep '^DATACORE_WORKER_BRIDGE_PORT=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    _val=$(printf '%s' "$_val" | tr -d '\r\n[:space:]"' | tr -d "'")
+    [ -n "$_val" ] && _p="$_val"
+  fi
+  [ -z "$_p" ] && _p="${DATACORE_WORKER_BRIDGE_PORT:-}"
+  printf '%s' "${_p:-43196}"
+}
+
+bridge_pid() {
+  _port=$1
+  _bpid=""
+  if command -v lsof >/dev/null 2>&1; then
+    _bpid=$(lsof -nP -iTCP:"$_port" -sTCP:LISTEN -t 2>/dev/null | head -n 1)
+  else
+    for _pf in "$ROOT/current/host-worker-bridge.pid" \
+               "$ROOT/current/bridge.pid" \
+               "$ROOT/host-worker-bridge.pid" \
+               "$ROOT/data/host-worker-bridge.pid"; do
+      if [ -f "$_pf" ]; then
+        _bpid=$(tr -d '\r\n[:space:]' < "$_pf" 2>/dev/null)
+        [ -n "$_bpid" ] && break
+      fi
+    done
+  fi
+  printf '%s' "$_bpid"
+}
+
 restart_bridge_if_running() {
   _stop="$ROOT/current/stop-host-worker-bridge.sh"
   _start="$ROOT/current/start-host-worker-bridge.sh"
   [ -x "$_stop" ] && [ -x "$_start" ] || return 0
-  pgrep -f 'host-worker-bridge' >/dev/null 2>&1 || return 0
-  _pids_before=$(pgrep -f 'host-worker-bridge' 2>/dev/null | tr '\n' ' ')
-  if ! (cd "$ROOT/current" && "$_stop" >/dev/null 2>&1 && "$_start" >/dev/null 2>&1); then
-    warn "could not restart the worker bridge — run: datacore restart"
-    return 0
-  fi
+
+  _port=$(bridge_port)
+  _pid_before=$(bridge_pid "$_port")
+  [ -n "$_pid_before" ] || return 0
+
+  (cd "$ROOT/current" && "$_stop" >/dev/null 2>&1) || true
+  (cd "$ROOT/current" && "$_start" >/dev/null 2>&1) || true
+
   _waited=0
-  while [ "$_waited" -lt 10 ]; do
-    for _pid in $(pgrep -f 'host-worker-bridge' 2>/dev/null); do
-      case " $_pids_before " in
-        *" $_pid "*) ;;
-        *) ok "restarted the worker bridge so it picks up the change"; return 0 ;;
-      esac
-    done
+  _max_wait="${DATACORE_BRIDGE_RESTART_TIMEOUT:-10}"
+  while [ "$_waited" -lt "$_max_wait" ]; do
+    _pid_after=$(bridge_pid "$_port")
+    if [ -n "$_pid_after" ] && [ "$_pid_after" != "$_pid_before" ]; then
+      if curl -fsS "http://127.0.0.1:${_port}/health" >/dev/null 2>&1; then
+        ok "restarted the worker bridge so it picks up the change"
+        return 0
+      fi
+    fi
     sleep 1
     _waited=$((_waited + 1))
   done
-  warn "the worker bridge did not come back after 10s"
-  warn "check it with: datacore doctor    then: datacore restart"
+
+  warn "the worker bridge did not restart, and workers will keep using the previous project map"
+  if [ -n "$_pid_before" ]; then
+    warn "remediation: kill the old bridge process (PID $_pid_before) and run: datacore restart"
+  else
+    warn "remediation: check it with: datacore doctor    then: datacore restart"
+  fi
+  exit 1
 }
 
 # ---------------------------------------------------------------- reading the report
