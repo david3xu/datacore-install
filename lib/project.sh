@@ -39,6 +39,15 @@ find_bun() {
   return 1
 }
 
+is_git_repo() {
+  [ -d "$1" ] || return 1
+  if command -v git >/dev/null 2>&1; then
+    git -C "$1" rev-parse --is-inside-work-tree >/dev/null 2>&1
+  else
+    [ -e "$1/.git" ]
+  fi
+}
+
 [ -f "$ENV_FILE" ] || die "Datacore is not installed, or its .env is missing: $ENV_FILE" \
   "Run the installer: https://github.com/david3xu/datacore-install"
 
@@ -296,7 +305,7 @@ cmd_list() {
       [ -n "$_name" ] || continue
       if [ ! -d "$_path" ]; then
         printf '  %s\n      %s  (missing — dispatch will fail)\n' "$_name" "$_path"
-      elif [ ! -d "$_path/.git" ]; then
+      elif ! is_git_repo "$_path"; then
         printf '  %s\n      %s  (not a git repository)\n' "$_name" "$_path"
       else
         printf '  %s\n      %s\n' "$_name" "$_path"
@@ -347,7 +356,7 @@ case "$sub" in
     # resolve against whatever directory the bridge happens to start in.
     _abs=$(cd "$_path" 2>/dev/null && pwd -P) || die "No such directory: $_path" \
       "Create the repository first, then map it."
-    if [ ! -d "$_abs/.git" ]; then
+    if ! is_git_repo "$_abs"; then
       warn "$_abs is not a git repository"
       warn "a worker records its work as commits there, so map a repository unless you are about to create one"
     fi

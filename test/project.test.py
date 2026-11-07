@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Exercise `datacore project` git repository detection for normal repos, worktrees, plain dirs, and missing paths."""
+
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+
+REPO = Path(__file__).resolve().parents[1]
+SCRIPT = REPO / "lib" / "project.sh"
+RUNTIME = shutil.which("bun") or shutil.which("node")
+
+
+@unittest.skipUnless(RUNTIME, "Bun or Node is required to run project.sh map tool")
+class ProjectWorktreeGitCheckTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="datacore-project-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.install = self.root / "install"
+        self.bin = self.install / "bin"
+        self.bin.mkdir(parents=True)
+        current = self.install / "current"
+        current.mkdir(parents=True)
+        (current / ".env").write_text("DATACORE_WORKER_PROJECT_WORKSPACES='{}'\n")
+        (self.bin / "bun").symlink_to(RUNTIME)
+
+        self.env = {
+            **os.environ,
+            "HOME": str(self.root),
+            "TMPDIR": str(self.root),
+            "DATACORE_INSTALL_ROOT": str(self.install),
+            "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
+        }
+
+    def run_project(self, *args: str, env_override: dict | None = None) -> subprocess.CompletedProcess:
+        env = self.env if env_override is None else env_override
+        return subprocess.run(
+            ["sh", str(SCRIPT), *args],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+
+    def test_a1_normal_repository_no_warning_and_unlabelled(self) -> None:
+        repo = self.root / "repo-a1"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+        res_link = self.run_project("link", "proj-a1", str(repo))
+        self.assertEqual(res_link.returncode, 0, f"link failed: {res_link.stderr}")
+        self.assertNotIn("is not a git repository", res_link.stderr)
+        self.assertIn("proj-a1", res_link.stdout)
+        self.assertNotIn("(not a git repository)", res_link.stdout)
+
+        res_list = self.run_project("list")
+        self.assertEqual(res_list.returncode, 0)
+        self.assertIn("proj-a1", res_list.stdout)
+        self.assertIn(str(repo), res_list.stdout)
+        self.assertNotIn("(not a git repository)", res_list.stdout)
+        self.assertNotIn("(missing — dispatch will fail)", res_list.stdout)
+
+    def test_a2_linked_worktree_behaves_same_as_normal_repo(self) -> None:
+        base_repo = self.root / "base-a2"
+        base_repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(base_repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(base_repo), "commit", "--allow-empty", "-m", "init", "-q"],
+            check=True,
+        )
+        worktree = self.root / "worktree-a2"
+        subprocess.run(
+            ["git", "-C", str(base_repo), "worktree", "add", "-q", str(worktree)],
+            check=True,
+        )
+
+        # Confirm that in a linked worktree, .git is a file, not a directory
+        git_entry = worktree / ".git"
+        self.assertTrue(git_entry.is_file(), f"Expected {git_entry} to be a file")
+
+        res_link = self.run_project("link", "proj-a2", str(worktree))
+        self.assertEqual(res_link.returncode, 0, f"link failed: {res_link.stderr}")
+        self.assertNotIn("is not a git repository", res_link.stderr)
+        self.assertIn("proj-a2", res_link.stdout)
+        self.assertNotIn("(not a git repository)", res_link.stdout)
+
+        res_list = self.run_project("list")
+        self.assertEqual(res_list.returncode, 0)
+        self.assertIn("proj-a2", res_list.stdout)
+        self.assertIn(str(worktree), res_list.stdout)
+        self.assertNotIn("(not a git repository)", res_list.stdout)
+        self.assertNotIn("(missing — dispatch will fail)", res_list.stdout)
+
+    def test_a3_plain_directory_warns_and_is_labelled(self) -> None:
+        plain = self.root / "plain-a3"
+        plain.mkdir()
+
+        res_link = self.run_project("link", "proj-a3", str(plain))
+        self.assertEqual(res_link.returncode, 0)
+        self.assertIn(f"{plain} is not a git repository", res_link.stderr)
+        self.assertIn("a worker records its work as commits there", res_link.stderr)
+        self.assertIn("(not a git repository)", res_link.stdout)
+
+        res_list = self.run_project("list")
+        self.assertEqual(res_list.returncode, 0)
+        self.assertIn("proj-a3", res_list.stdout)
+        self.assertIn(f"{plain}  (not a git repository)", res_list.stdout)
+
+    def test_a4_missing_path_shows_missing_dispatch_will_fail(self) -> None:
+        target = self.root / "disappearing-a4"
+        target.mkdir()
+
+        res_link = self.run_project("link", "proj-a4", str(target))
+        self.assertEqual(res_link.returncode, 0)
+
+        # Remove the directory so it becomes missing
+        target.rmdir()
+        self.assertFalse(target.exists())
+
+        res_list = self.run_project("list")
+        self.assertEqual(res_list.returncode, 0)
+        self.assertIn("proj-a4", res_list.stdout)
+        self.assertIn(f"{target}  (missing — dispatch will fail)", res_list.stdout)
+
+    def test_fallback_when_git_is_not_installed(self) -> None:
+        """Verify fallback [ -e "$path/.git" ] when git command is not available on PATH."""
+        no_git_bin = self.root / "no_git_bin"
+        no_git_bin.mkdir()
+        for b in ["sh", "rm", "cat", "mktemp", "pwd", "mkdir"]:
+            p = shutil.which(b)
+            if p:
+                (no_git_bin / b).symlink_to(p)
+        (no_git_bin / "bun").symlink_to(RUNTIME)
+
+        no_git_env = {
+            "HOME": str(self.root),
+            "TMPDIR": str(self.root),
+            "DATACORE_INSTALL_ROOT": str(self.install),
+            "PATH": str(no_git_bin),
+        }
+
+        # Confirm git is indeed absent in this environment
+        probe = subprocess.run(["sh", "-c", "command -v git"], env=no_git_env, capture_output=True)
+        self.assertNotEqual(probe.returncode, 0)
+
+        # Prepare normal repo and linked worktree fixtures beforehand
+        repo = self.root / "fallback-repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+        base = self.root / "fallback-base"
+        base.mkdir()
+        subprocess.run(["git", "init", "-q", str(base)], check=True)
+        subprocess.run(["git", "-C", str(base), "commit", "--allow-empty", "-m", "init", "-q"], check=True)
+        wt = self.root / "fallback-wt"
+        subprocess.run(["git", "-C", str(base), "worktree", "add", "-q", str(wt)], check=True)
+
+        plain = self.root / "fallback-plain"
+        plain.mkdir()
+
+        # Link normal repo without git on PATH
+        res_link_repo = self.run_project("link", "fb-repo", str(repo), env_override=no_git_env)
+        self.assertEqual(res_link_repo.returncode, 0)
+        self.assertNotIn("is not a git repository", res_link_repo.stderr)
+        self.assertNotIn("(not a git repository)", res_link_repo.stdout)
+
+        # Link worktree without git on PATH (fallback checks [ -e "$path/.git" ])
+        res_link_wt = self.run_project("link", "fb-wt", str(wt), env_override=no_git_env)
+        self.assertEqual(res_link_wt.returncode, 0)
+        self.assertNotIn("is not a git repository", res_link_wt.stderr)
+        self.assertNotIn("(not a git repository)", res_link_wt.stdout)
+
+        # Link plain dir without git on PATH
+        res_link_plain = self.run_project("link", "fb-plain", str(plain), env_override=no_git_env)
+        self.assertEqual(res_link_plain.returncode, 0)
+        self.assertIn("is not a git repository", res_link_plain.stderr)
+        self.assertIn("(not a git repository)", res_link_plain.stdout)
+
+        # List all without git on PATH
+        res_list = self.run_project("list", env_override=no_git_env)
+        self.assertEqual(res_list.returncode, 0)
+        self.assertIn("fb-repo", res_list.stdout)
+        self.assertIn("fb-wt", res_list.stdout)
+        self.assertIn("fb-plain", res_list.stdout)
+        self.assertNotIn(f"{repo}  (not a git repository)", res_list.stdout)
+        self.assertNotIn(f"{wt}  (not a git repository)", res_list.stdout)
+        self.assertIn(f"{plain}  (not a git repository)", res_list.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
