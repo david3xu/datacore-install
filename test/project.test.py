@@ -249,7 +249,8 @@ exit 0
             res.stderr,
         )
         self.assertIn("remediation:", res.stderr)
-        self.assertIn("datacore restart", res.stderr)
+        self.assertNotIn("datacore restart", res.stderr)
+        self.assertIn("./start-host-worker-bridge.sh", res.stderr)
         self.assertIn("1001", res.stderr)
 
         # Mapping must still be saved
@@ -373,7 +374,7 @@ exit 0
         self.assertNotIn(f"{wt}  (not a git repository)", res_list2.stdout)
 
     def test_fallback_when_lsof_is_unavailable_uses_pid_file(self) -> None:
-        """Verify fallback to PID file when lsof is not available on PATH."""
+        """Verify fallback to <temp DATACORE_HOME>/host-worker-bridge/host-worker-bridge.pid when lsof is unavailable."""
         repo = self.root / "repo-fb-lsof"
         repo.mkdir()
         subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -392,6 +393,15 @@ exit 0
 """)
         curl_shim.chmod(0o755)
 
+        data_home = self.root / "data_home"
+        bridge_dir = data_home / "host-worker-bridge"
+        bridge_dir.mkdir(parents=True)
+        pid_file = bridge_dir / "host-worker-bridge.pid"
+        pid_file.write_text("3001\n")
+
+        current = self.install / "current"
+        (current / ".env").write_text(f"DATACORE_HOME={data_home}\nDATACORE_WORKER_PROJECT_WORKSPACES='{{}}'\n")
+
         no_lsof_env = {
             "HOME": str(self.root),
             "TMPDIR": str(self.root),
@@ -403,10 +413,6 @@ exit 0
         # Confirm lsof is absent
         probe = subprocess.run(["sh", "-c", "command -v lsof"], env=no_lsof_env, capture_output=True)
         self.assertNotEqual(probe.returncode, 0)
-
-        current = self.install / "current"
-        pid_file = current / "host-worker-bridge.pid"
-        pid_file.write_text("3001\n")
 
         # Case 1: stop changes the PID file to a new PID -> success
         stop_sh = current / "stop-host-worker-bridge.sh"
@@ -438,7 +444,130 @@ exit 0
         self.assertNotIn("restarted the worker bridge", res_fail.stdout)
         self.assertIn("the worker bridge did not restart, and workers will keep using the previous project map", res_fail.stderr)
         self.assertIn("remediation:", res_fail.stderr)
-        self.assertIn("datacore restart", res_fail.stderr)
+        self.assertNotIn("datacore restart", res_fail.stderr)
+        self.assertIn("3002", res_fail.stderr)
+        self.assertIn("./start-host-worker-bridge.sh", res_fail.stderr)
+
+    def test_fallback_when_lsof_is_unavailable_uses_bridge_state_dir(self) -> None:
+        """Verify fallback uses overriding DATACORE_WORKER_BRIDGE_STATE_DIR when lsof is unavailable."""
+        repo = self.root / "repo-fb-statedir"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+        no_lsof_bin = self.root / "no_lsof_bin_statedir"
+        no_lsof_bin.mkdir()
+        for b in ["sh", "rm", "cat", "mktemp", "pwd", "mkdir", "git", "grep", "cut", "tail", "tr", "sleep"]:
+            p = shutil.which(b)
+            if p:
+                (no_lsof_bin / b).symlink_to(p)
+        (no_lsof_bin / "bun").symlink_to(RUNTIME)
+
+        curl_shim = no_lsof_bin / "curl"
+        curl_shim.write_text("""#!/bin/sh
+exit 0
+""")
+        curl_shim.chmod(0o755)
+
+        custom_state = self.root / "custom_bridge_state"
+        custom_state.mkdir(parents=True)
+        pid_file = custom_state / "host-worker-bridge.pid"
+        pid_file.write_text("4001\n")
+
+        current = self.install / "current"
+        (current / ".env").write_text(
+            f"DATACORE_WORKER_BRIDGE_STATE_DIR={custom_state}\nDATACORE_WORKER_PROJECT_WORKSPACES='{{}}'\n"
+        )
+
+        no_lsof_env = {
+            "HOME": str(self.root),
+            "TMPDIR": str(self.root),
+            "DATACORE_INSTALL_ROOT": str(self.install),
+            "PATH": str(no_lsof_bin),
+            "DATACORE_BRIDGE_RESTART_TIMEOUT": "1",
+        }
+
+        # Case 1: stop changes the PID file in custom_state -> success
+        stop_sh = current / "stop-host-worker-bridge.sh"
+        stop_sh.write_text(f"""#!/bin/sh
+rm -f "{pid_file}"
+exit 0
+""")
+        stop_sh.chmod(0o755)
+
+        start_sh = current / "start-host-worker-bridge.sh"
+        start_sh.write_text(f"""#!/bin/sh
+printf '4002\\n' > "{pid_file}"
+exit 0
+""")
+        start_sh.chmod(0o755)
+
+        res = self.run_project("link", "proj-fb-sd", str(repo), env_override=no_lsof_env)
+        self.assertEqual(res.returncode, 0, f"link failed: {res.stderr}")
+        self.assertIn("restarted the worker bridge so it picks up the change", res.stdout)
+
+        # Case 2: stop leaves the PID file unchanged in custom_state -> failure with remediation
+        pid_file.write_text("4002\n")
+        stop_sh.write_text("""#!/bin/sh
+exit 0
+""")
+        res_fail = self.run_project("link", "proj-fb-sd2", str(repo), env_override=no_lsof_env)
+        self.assertNotEqual(res_fail.returncode, 0)
+        self.assertNotIn("restarted the worker bridge", res_fail.stdout)
+        self.assertIn("remediation:", res_fail.stderr)
+        self.assertNotIn("datacore restart", res_fail.stderr)
+        self.assertIn("4002", res_fail.stderr)
+        self.assertIn("./start-host-worker-bridge.sh", res_fail.stderr)
+
+    def test_remediation_text_contains_no_datacore_restart(self) -> None:
+        """Verify remediation text on failed bridge restart contains no 'datacore restart'."""
+        repo = self.root / "repo-remediation"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+
+        listener_file = self.root / "listener_remediation.txt"
+        listener_file.write_text("5001\n")
+
+        lsof_shim = self.bin / "lsof"
+        lsof_shim.write_text(f"""#!/bin/sh
+cat "{listener_file}"
+exit 0
+""")
+        lsof_shim.chmod(0o755)
+
+        curl_shim = self.bin / "curl"
+        curl_shim.write_text("""#!/bin/sh
+exit 0
+""")
+        curl_shim.chmod(0o755)
+
+        current = self.install / "current"
+        stop_sh = current / "stop-host-worker-bridge.sh"
+        stop_sh.write_text("""#!/bin/sh
+exit 0
+""")
+        stop_sh.chmod(0o755)
+
+        start_sh = current / "start-host-worker-bridge.sh"
+        start_sh.write_text("""#!/bin/sh
+exit 0
+""")
+        start_sh.chmod(0o755)
+
+        env = {**self.env, "DATACORE_BRIDGE_RESTART_TIMEOUT": "1"}
+        res = self.run_project("link", "proj-remediation", str(repo), env_override=env)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("remediation:", res.stderr)
+        self.assertNotIn("datacore restart", res.stderr)
+        self.assertIn("kill the old bridge process (PID 5001)", res.stderr)
+        self.assertIn("./start-host-worker-bridge.sh", res.stderr)
+
+    def test_help_documents_exit_code_on_failed_bridge_restart(self) -> None:
+        """Verify project --help documents that project link and unlink exit 1 when bridge does not restart."""
+        res = self.run_project("--help")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("project link", res.stdout)
+        self.assertIn("project unlink", res.stdout)
+        self.assertIn("exit 1 when the bridge does not restart", res.stdout)
 
 
 if __name__ == "__main__":

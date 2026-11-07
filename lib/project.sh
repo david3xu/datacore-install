@@ -224,21 +224,40 @@ bridge_port() {
   printf '%s' "${_p:-43196}"
 }
 
+bridge_state_dir() {
+  _s=""
+  if [ -f "$ENV_FILE" ]; then
+    _val=$(grep '^DATACORE_WORKER_BRIDGE_STATE_DIR=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    _val=$(printf '%s' "$_val" | tr -d '\r\n"' | tr -d "'")
+    [ -n "$_val" ] && _s="$_val"
+  fi
+  [ -z "$_s" ] && _s="${DATACORE_WORKER_BRIDGE_STATE_DIR:-}"
+  if [ -n "$_s" ]; then
+    printf '%s' "$_s"
+    return 0
+  fi
+
+  _h=""
+  if [ -f "$ENV_FILE" ]; then
+    _val=$(grep '^DATACORE_HOME=' "$ENV_FILE" 2>/dev/null | tail -n 1 | cut -d= -f2-)
+    _val=$(printf '%s' "$_val" | tr -d '\r\n"' | tr -d "'")
+    [ -n "$_val" ] && _h="$_val"
+  fi
+  [ -z "$_h" ] && _h="${DATACORE_HOME:-}"
+  [ -z "$_h" ] && _h="$ROOT/data"
+  printf '%s/host-worker-bridge' "$_h"
+}
+
 bridge_pid() {
   _port=$1
   _bpid=""
   if command -v lsof >/dev/null 2>&1; then
     _bpid=$(lsof -nP -iTCP:"$_port" -sTCP:LISTEN -t 2>/dev/null | head -n 1)
   else
-    for _pf in "$ROOT/current/host-worker-bridge.pid" \
-               "$ROOT/current/bridge.pid" \
-               "$ROOT/host-worker-bridge.pid" \
-               "$ROOT/data/host-worker-bridge.pid"; do
-      if [ -f "$_pf" ]; then
-        _bpid=$(tr -d '\r\n[:space:]' < "$_pf" 2>/dev/null)
-        [ -n "$_bpid" ] && break
-      fi
-    done
+    _pf="$(bridge_state_dir)/host-worker-bridge.pid"
+    if [ -f "$_pf" ]; then
+      _bpid=$(tr -d '\r\n[:space:]' < "$_pf" 2>/dev/null)
+    fi
   fi
   printf '%s' "$_bpid"
 }
@@ -271,9 +290,9 @@ restart_bridge_if_running() {
 
   warn "the worker bridge did not restart, and workers will keep using the previous project map"
   if [ -n "$_pid_before" ]; then
-    warn "remediation: kill the old bridge process (PID $_pid_before) and run: datacore restart"
+    warn "remediation: kill the old bridge process (PID $_pid_before), then run: cd \"$ROOT/current\" && ./start-host-worker-bridge.sh"
   else
-    warn "remediation: check it with: datacore doctor    then: datacore restart"
+    warn "remediation: cd \"$ROOT/current\" && ./start-host-worker-bridge.sh"
   fi
   exit 1
 }
@@ -315,6 +334,9 @@ Subcommands:
 A worker is dispatched into the workspace its project is mapped to. The name must be the project
 name as Datacore knows it — the one you see in `get_tasks` or on a task — and matching is exact:
 no "default" entry and no wildcard stands in for a project that is not listed here.
+
+`project link` and `project unlink` restart the running worker bridge so changes take effect
+immediately; both exit 1 when the bridge does not restart.
 EOF
   exit 0
 }
