@@ -36,6 +36,20 @@ HEALTHY = "✓ OK   runtime:reachable\n· SKIP bridge_dispatch:launcher:muse\nsu
 MISSING_CLI = "✓ OK   runtime:reachable\n✗ FAIL bridge_dispatch:launcher:muse\nsummary: 1 ok, 1 fail, 0 skip (2 total)\n"
 BLOCKING = "✗ FAIL runtime:reachable\nsummary: 0 ok, 1 fail, 0 skip (1 total)\n"
 
+HEALTHY_NEW = "✓ OK   runtime:reachable\n· SKIP bridge_dispatch:launcher:muse\nsummary: 1 ok, 0 fail, 0 warn, 1 skip (2 total)\n"
+WARNED_NEW = (
+    "✓ OK   runtime:reachable\n"
+    "! WARN bridge:bind\n"
+    "· SKIP bridge_dispatch:launcher:muse\n"
+    "summary: 1 ok, 0 fail, 1 warn, 1 skip (3 total)\n"
+)
+MISSING_CLI_NEW = (
+    "✓ OK   runtime:reachable\n"
+    "✗ FAIL bridge_dispatch:launcher:muse\n"
+    "summary: 1 ok, 1 fail, 0 warn, 0 skip (2 total)\n"
+)
+BLOCKING_NEW = "✗ FAIL runtime:reachable\nsummary: 0 ok, 1 fail, 0 warn, 0 skip (1 total)\n"
+
 
 class InstallFlowTests(unittest.TestCase):
     def setUp(self):
@@ -70,12 +84,61 @@ class InstallFlowTests(unittest.TestCase):
             ("crash after complete report", HEALTHY, 37, False),
             ("nonzero without failures", HEALTHY, 1, False),
             ("zero despite failures", MISSING_CLI, 0, False),
+            ("healthy new format with 0 warn", HEALTHY_NEW, 0, True),
+            ("healthy new format with warn > 0", WARNED_NEW, 0, True),
+            ("nonzero with warnings but no failures", WARNED_NEW, 1, False),
+            ("missing optional CLI new format", MISSING_CLI_NEW, 1, True),
+            ("missing optional CLI new format zero exit", MISSING_CLI_NEW, 0, False),
+            ("blocking failure new format", BLOCKING_NEW, 1, False),
+            ("blocking failure new format zero exit", BLOCKING_NEW, 0, False),
+            ("warn count mismatch: check without summary count",
+             "✓ OK   runtime:reachable\n! WARN bridge:bind\nsummary: 1 ok, 0 fail, 0 warn, 0 skip (1 total)\n", 0, False),
+            ("warn count mismatch: summary count without check",
+             "✓ OK   runtime:reachable\nsummary: 1 ok, 0 fail, 1 warn, 0 skip (2 total)\n", 0, False),
+            ("warn count mismatch: count differs", WARNED_NEW.replace("1 warn", "2 warn"), 0, False),
+            ("malformed summary missing parens",
+             "✓ OK   runtime:reachable\nsummary: 1 ok, 0 fail, 0 warn, 0 skip 1 total\n", 0, False),
+            ("malformed summary missing fields", "✓ OK   runtime:reachable\nsummary: 1 ok, 0 fail, 0 warn\n", 0, False),
+            ("malformed summary non-numeric count",
+             "✓ OK   runtime:reachable\nsummary: one ok, 0 fail, 0 warn, 0 skip (1 total)\n", 0, False),
+            ("malformed summary wrong total",
+             "✓ OK   runtime:reachable\nsummary: 1 ok, 0 fail, 0 warn, 0 skip (2 total)\n", 0, False),
+            ("malformed summary trailing text",
+             "✓ OK   runtime:reachable\nsummary: 1 ok, 0 fail, 0 warn, 0 skip (1 total) extra\n", 0, False),
         ]
         for name, report, status, expected in cases:
             with self.subTest(name=name):
                 result = self.report_ok(report, status)
                 self.assertEqual(result.returncode == 0, expected, result.stderr)
         self.assertNotEqual(self.report_ok(MISSING_CLI, 1, optional=False).returncode, 0)
+        self.assertNotEqual(self.report_ok(MISSING_CLI_NEW, 1, optional=False).returncode, 0)
+
+    def test_installer_gate_warns_on_nonblocking_doctor_warnings_and_continues(self):
+        bundle = self.home / "bundle"
+        bundle.mkdir()
+        doctor = bundle / "doctor.sh"
+        doctor.write_text(
+            "#!/bin/sh\n"
+            "cat << 'EOF'\n"
+            "✓ OK   runtime:reachable\n"
+            "! WARN bridge:bind\n"
+            "! WARN executor_config:path_set\n"
+            "· SKIP bridge_dispatch:launcher:muse\n"
+            "summary: 1 ok, 0 fail, 2 warn, 1 skip (4 total)\n"
+            "EOF\n"
+            "exit 0\n"
+        )
+        doctor.chmod(0o755)
+        result = shell(
+            "ok() { printf 'SUCCESS %s\\n' \"$*\"; }\n"
+            "warn() { printf 'WARN %s\\n' \"$*\"; }\n"
+            "die() { printf '%s\\n' \"$*\" >&2; exit 1; }\n" +
+            function("doctor_report_ok") + "\n" + function("gate_on_doctor") + "\n" +
+            f"BUNDLE_DIR={shlex.quote(str(bundle))}\nBIN_DIR=$HOME/bin\ngate_on_doctor", self.home,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("WARN doctor: bridge:bind, executor_config:path_set — run: datacore doctor", result.stdout)
+        self.assertIn("SUCCESS doctor: no blocking failures", result.stdout)
 
     def test_installer_gate_rejects_crash_and_keeps_diagnostic_log(self):
         bundle = self.home / "bundle"

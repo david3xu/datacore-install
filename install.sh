@@ -709,18 +709,22 @@ lean_workers() {
 doctor_report_ok() {
   awk -v status="$2" -v allow_launchers="${3:-0}" '
     NF { last = NR }
-    /^[^[:space:]]+[[:space:]]+(OK|FAIL|SKIP)[[:space:]]+[^[:space:]]+[[:space:]]*$/ {
+    /^[^[:space:]]+[[:space:]]+(OK|FAIL|WARN|SKIP)[[:space:]]+[^[:space:]]+[[:space:]]*$/ {
       counts[$2]++
       if ($2 == "FAIL" && $3 !~ /^bridge_dispatch:launcher:/) blocking++
     }
     /^summary: [0-9]+ ok, [0-9]+ fail, [0-9]+ skip \([0-9]+ total\)$/ {
       summaries++; summary_line = NR
-      ok = $2; fail = $4; skip = $6; total = $8; sub(/^\(/, "", total)
+      ok = $2; fail = $4; warn = 0; skip = $6; total = $8; sub(/^\(/, "", total)
+    }
+    /^summary: [0-9]+ ok, [0-9]+ fail, [0-9]+ warn, [0-9]+ skip \([0-9]+ total\)$/ {
+      summaries++; summary_line = NR
+      ok = $2; fail = $4; warn = $6; skip = $8; total = $10; sub(/^\(/, "", total)
     }
     END {
       if (summaries != 1 || summary_line != last || total < 1 ||
-          counts["OK"] != ok || counts["FAIL"] != fail || counts["SKIP"] != skip ||
-          ok + fail + skip != total) exit 1
+          counts["OK"] != ok || counts["FAIL"] != fail || counts["WARN"] != warn || counts["SKIP"] != skip ||
+          ok + fail + warn + skip != total) exit 1
       if (fail == 0) exit (status != 0)
       exit !(status == 1 && allow_launchers == 1 && blocking == 0)
     }
@@ -739,11 +743,15 @@ Full report: $_dlog
 Re-run:      $BIN_DIR/datacore doctor"
   fi
   _workers=$(grep ' FAIL ' "$_dlog" | grep -c 'bridge_dispatch:launcher:' || true)
+  _warned=$(awk '/^[^[:space:]]+[[:space:]]+WARN[[:space:]]+[^[:space:]]+[[:space:]]*$/ { printf "%s%s", (n++ ? ", " : ""), $3 }' "$_dlog")
   rm -f "$_dlog"
   if [ "${_workers:-0}" -gt 0 ]; then
     ok "doctor: no blocking failures ($_workers optional worker CLI not installed)"
   else
     ok "doctor: no blocking failures"
+  fi
+  if [ -n "$_warned" ]; then
+    warn "doctor: $_warned — run: datacore doctor"
   fi
 }
 
