@@ -62,11 +62,10 @@ for arch in amd64 arm64; do
   bver=""
   if [ -n "$top_dir" ]; then
     case "$top_dir" in
-      */) ;;
-      */*) top_dir="${top_dir%/*}/" ;;
-      *) top_dir="$top_dir/" ;;
+      ./*) top_dir="${top_dir#./}" ;;
     esac
-    bver=$(tar -xOzf "$archive" "${top_dir}manifest.json" 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+    top_dir="${top_dir%%/*}/"
+    bver=$(tar -xOzf "$archive" "${top_dir}manifest.json" "./${top_dir}manifest.json" 2>/dev/null | sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
   fi
   if [ -z "$bver" ]; then
     printf 'Bundle %s manifest is missing or unreadable.\n' "$name" >&2

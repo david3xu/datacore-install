@@ -969,9 +969,19 @@ jobs:
           set -eu
           T=$(mktemp -d)
           pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          ver="${pinned#v}"
           mkdir -p "$T/bundle"
+          make_bundle() {
+            arch="$1"
+            v="$2"
+            d=$(mktemp -d)
+            mkdir -p "$d/datacore-local-edition-$v"
+            printf '{\n  "version": "%s"\n}\n' "$v" > "$d/datacore-local-edition-$v/manifest.json"
+            tar -C "$d" -czf "$T/bundle/datacore-local-edition-$arch.tar.gz" "datacore-local-edition-$v"
+            rm -rf "$d"
+          }
           for arch in amd64 arm64; do
-            echo "not a real bundle" > "$T/bundle/datacore-local-edition-$arch.tar.gz"
+            make_bundle "$arch" "$ver"
           done
 
           sh make-release.sh "$pinned" "$T/bundle" > "$T/out" 2>&1 \
@@ -1012,10 +1022,20 @@ jobs:
           set -eu
           T=$(mktemp -d)
           pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          ver="${pinned#v}"
           mkdir -p "$T/bundle"
+          make_bundle() {
+            arch="$1"
+            v="$2"
+            d=$(mktemp -d)
+            mkdir -p "$d/datacore-local-edition-$v"
+            printf '{\n  "version": "%s"\n}\n' "$v" > "$d/datacore-local-edition-$v/manifest.json"
+            tar -C "$d" -czf "$T/bundle/datacore-local-edition-$arch.tar.gz" "datacore-local-edition-$v"
+            rm -rf "$d"
+          }
           # arm64 only: exactly the shape of the published draft, where SHA256SUMS named an amd64
           # archive that was never attached.
-          echo x > "$T/bundle/datacore-local-edition-arm64.tar.gz"
+          make_bundle arm64 "$ver"
           set +e
           sh make-release.sh "$pinned" "$T/bundle" > "$T/out" 2>&1
           status=$?
@@ -1032,7 +1052,20 @@ jobs:
         run: |
           set -eu
           T=$(mktemp -d); mkdir -p "$T/bundle"
-          for arch in amd64 arm64; do echo x > "$T/bundle/datacore-local-edition-$arch.tar.gz"; done
+          pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          ver="${pinned#v}"
+          make_bundle() {
+            arch="$1"
+            v="$2"
+            d=$(mktemp -d)
+            mkdir -p "$d/datacore-local-edition-$v"
+            printf '{\n  "version": "%s"\n}\n' "$v" > "$d/datacore-local-edition-$v/manifest.json"
+            tar -C "$d" -czf "$T/bundle/datacore-local-edition-$arch.tar.gz" "datacore-local-edition-$v"
+            rm -rf "$d"
+          }
+          for arch in amd64 arm64; do
+            make_bundle "$arch" "$ver"
+          done
           set +e
           sh make-release.sh v0.0.1 "$T/bundle" > "$T/out" 2>&1
           status=$?
@@ -1044,12 +1077,53 @@ jobs:
           fi
           echo "refused a version install.sh does not pin"
 
+      - name: A bundle whose version differs from the installer is refused
+        run: |
+          set -eu
+          T=$(mktemp -d); mkdir -p "$T/bundle"
+          pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          make_bundle() {
+            arch="$1"
+            v="$2"
+            d=$(mktemp -d)
+            mkdir -p "$d/datacore-local-edition-$v"
+            printf '{\n  "version": "%s"\n}\n' "$v" > "$d/datacore-local-edition-$v/manifest.json"
+            tar -C "$d" -czf "$T/bundle/datacore-local-edition-$arch.tar.gz" "datacore-local-edition-$v"
+            rm -rf "$d"
+          }
+          for arch in amd64 arm64; do
+            make_bundle "$arch" "0.0.1"
+          done
+          set +e
+          sh make-release.sh "$pinned" "$T/bundle" > "$T/out" 2>&1
+          status=$?
+          set -e
+          if [ "$status" = 0 ]; then
+            cat "$T/out"
+            echo "::error::assembled bundles whose version differs from the installer"
+            exit 1
+          fi
+          grep -q "Installer and bundle versions must match" "$T/out" || { cat "$T/out"; echo "::error::refusal does not name the version mismatch"; exit 1; }
+          echo "refused bundles whose version differs from the installer"
+
       - name: A helper named in CLI_FILES but absent from the repo is refused
         run: |
           set -eu
           T=$(mktemp -d); mkdir -p "$T/bundle"
-          for arch in amd64 arm64; do echo x > "$T/bundle/datacore-local-edition-$arch.tar.gz"; done
           pinned=$(sed -n 's/^PINNED_RELEASE="\(.*\)"$/\1/p' install.sh)
+          ver="${pinned#v}"
+          make_bundle() {
+            arch="$1"
+            v="$2"
+            d=$(mktemp -d)
+            mkdir -p "$d/datacore-local-edition-$v"
+            printf '{\n  "version": "%s"\n}\n' "$v" > "$d/datacore-local-edition-$v/manifest.json"
+            tar -C "$d" -czf "$T/bundle/datacore-local-edition-$arch.tar.gz" "datacore-local-edition-$v"
+            rm -rf "$d"
+          }
+          for arch in amd64 arm64; do
+            make_bundle "$arch" "$ver"
+          done
           sed -i 's|^CLI_FILES="\(.*\)"$|CLI_FILES="\1 lib/not-written-yet.sh"|' install.sh
           set +e
           sh make-release.sh "$pinned" "$T/bundle" > "$T/out" 2>&1

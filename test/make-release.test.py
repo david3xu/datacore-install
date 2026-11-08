@@ -28,7 +28,7 @@ def build_fake_archive(dest_path: Path, bundle_ver: str, has_manifest: bool = Tr
                 "product": "Datacore Local Edition",
                 "version": bundle_ver,
             }
-            content = json.dumps(manifest_data).encode("utf-8") + b"\n"
+            content = json.dumps(manifest_data, indent=2).encode("utf-8") + b"\n"
             ti_file = tarfile.TarInfo(f"{dir_name}/manifest.json")
             ti_file.size = len(content)
             tf.addfile(ti_file, io.BytesIO(content))
@@ -101,6 +101,35 @@ class MakeReleaseGuardTests(unittest.TestCase):
         result = self.run_make_release("v0.1.88", self.bundle_dir)
         self.assertEqual(result.returncode, 1)
         self.assertIn("Bundle datacore-local-edition-amd64.tar.gz manifest is missing or unreadable.", result.stderr)
+
+    def test_archive_without_dir_entries_nested_first_entry(self):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+            dir_name = "datacore-local-edition-0.1.88"
+            # Add a nested file as the first entry, without adding directory entries
+            dummy_content = b"nested file content\n"
+            ti_dummy = tarfile.TarInfo(f"{dir_name}/nested/file.txt")
+            ti_dummy.size = len(dummy_content)
+            tf.addfile(ti_dummy, io.BytesIO(dummy_content))
+
+            # Add manifest
+            manifest_data = {
+                "product": "Datacore Local Edition",
+                "version": "0.1.88",
+            }
+            content = json.dumps(manifest_data, indent=2).encode("utf-8") + b"\n"
+            ti_file = tarfile.TarInfo(f"{dir_name}/manifest.json")
+            ti_file.size = len(content)
+            tf.addfile(ti_file, io.BytesIO(content))
+
+        dest_amd64 = self.bundle_dir / "datacore-local-edition-amd64.tar.gz"
+        dest_amd64.write_bytes(buf.getvalue())
+        build_fake_archive(self.bundle_dir / "datacore-local-edition-arm64.tar.gz", "0.1.88")
+
+        result = self.run_make_release("v0.1.88", self.bundle_dir)
+        self.assertNotIn("manifest is missing or unreadable", result.stderr)
+        self.assertNotIn("Installer and bundle versions must match", result.stderr)
+        self.assertEqual(result.returncode, 0, f"make-release failed unexpectedly:\n{result.stderr}")
 
 
 if __name__ == "__main__":

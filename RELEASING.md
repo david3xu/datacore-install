@@ -6,7 +6,7 @@ Changing a helper in this checkout does not update an existing release asset. St
 new release for the worker-choice and preflight fixes; do not claim the pinned release includes
 them until its published assets actually carry them.
 
-### Versioning
+## Versioning
 
 - Installer vX.Y.Z ships bundle X.Y.Z, and `make-release.sh` enforces it.
 - A helper-only fix still requires cutting a bundle with the same number.
@@ -46,6 +46,7 @@ upload commands. It refuses to:
   assets they get
 - stage without both `amd64` and `arm64`
 - stage when `CLI_FILES` names a file the repo does not have
+- ship a bundle whose manifest version differs from the installer version, or has no readable manifest
 
 It does not upload and does not publish. Both are deliberate.
 
