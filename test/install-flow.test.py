@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise installer and CI failure paths without Docker, network, or launchd."""
 
+import hashlib
 import os
 from pathlib import Path
 import pty
@@ -381,6 +382,205 @@ class InstallFlowTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Projects   none mapped — nothing can be dispatched yet", result.stdout)
         self.assertIn("Next:  datacore project link", result.stdout)
+
+    def run_install_command_step(self, sums_dict, fetch_func, cli_files=None):
+        sums_path = self.home / "SHA256SUMS"
+        sums_lines = [f"{digest}  {name}\n" for name, digest in sums_dict.items()]
+        sums_path.write_text("".join(sums_lines))
+        cli_def = f'CLI_FILES="{cli_files}"\n' if cli_files is not None else ""
+        return shell(
+            "B=''; D=''; R=''\n"
+            "say() { printf '%s\\n' \"$*\"; }\n"
+            "ok() { printf 'OK %s\\n' \"$*\"; }\n"
+            "info() { printf 'INFO %s\\n' \"$*\"; }\n"
+            "warn() { printf 'WARN %s\\n' \"$*\"; }\n"
+            "die() {\n"
+            "  printf '\\nInstall stopped. %s\\n\\n' \"$1\" >&2\n"
+            "  shift\n"
+            "  while [ $# -gt 0 ]; do printf '%s\\n' \"$1\" >&2; shift; done\n"
+            "  printf '\\n' >&2\n"
+            "  exit 1\n"
+            "}\n"
+            + function("step") + "\n"
+            + function("sha256_of") + "\n"
+            + fetch_func + "\n"
+            + function("install_command") + "\n"
+            + "BIN_DIR=$HOME/bin\n"
+            + "RELEASE_BASE=https://github.com/david3xu/datacore-install/releases\n"
+            + "VERSION=v0.1.89\n"
+            + "SELF_DIR=''\n"
+            + f"SUMS_FILE={shlex.quote(str(sums_path))}\n"
+            + cli_def
+            + "lean_workers() { touch \"$HOME/lean-workers-called\"; printf 'LEAN_WORKERS\\n'; }\n"
+            + "step 'Installing the command'; install_command\n"
+            + "step 'Workers'; lean_workers\n",
+            self.home,
+        )
+
+    def test_listed_helper_download_failure_stops_install_and_never_reaches_lean_workers(self):
+        script_content = "#!/bin/sh\nexit 0\n"
+        digest = hashlib.sha256(script_content.encode("utf-8")).hexdigest()
+        sums = {"datacore": digest, "worker.sh": digest}
+        fetch_stub = (
+            "fetch() {\n"
+            "  case \"$1\" in\n"
+            "    */datacore)\n"
+            "      mkdir -p \"$(dirname \"$2\")\"\n"
+            "      printf '#!/bin/sh\\nexit 0\\n' > \"$2\" ;;\n"
+            "    */worker.sh)\n"
+            "      printf 'curl: (22) The requested URL returned error: 504 Gateway Timeout\\n' >&2\n"
+            "      return 22 ;;\n"
+            "  esac\n"
+            "}\n"
+        )
+        result = self.run_install_command_step(sums, fetch_stub, cli_files="datacore lib/worker.sh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Installing the command", result.stdout)
+        self.assertNotIn("Workers", result.stdout)
+        self.assertNotIn("LEAN_WORKERS", result.stdout)
+        self.assertFalse((self.home / "lean-workers-called").exists())
+        self.assertIn(
+            "Could not download worker.sh from https://github.com/david3xu/datacore-install/releases/download/v0.1.89/worker.sh.",
+            result.stderr,
+        )
+        self.assertIn(
+            "This release carries it, so the download failed: check your network or try again in a few minutes.",
+            result.stderr,
+        )
+        self.assertIn("curl: (22) The requested URL returned error: 504 Gateway Timeout", result.stderr)
+        self.assertIn("Install stopped.", result.stderr)
+
+    def test_listed_helper_bad_checksum_dies(self):
+        script_content = "#!/bin/sh\nexit 0\n"
+        digest = hashlib.sha256(script_content.encode("utf-8")).hexdigest()
+        sums = {
+            "datacore": digest,
+            "worker.sh": "0000000000000000000000000000000000000000000000000000000000000000",
+        }
+        fetch_stub = (
+            "fetch() {\n"
+            "  mkdir -p \"$(dirname \"$2\")\"\n"
+            "  printf '#!/bin/sh\\nexit 0\\n' > \"$2\"\n"
+            "}\n"
+        )
+        result = self.run_install_command_step(sums, fetch_stub, cli_files="datacore lib/worker.sh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Checksum mismatch on worker.sh — refusing to install.", result.stderr)
+        self.assertIn("Install stopped.", result.stderr)
+        self.assertFalse((self.home / "bin/lib/worker.sh").exists())
+        self.assertFalse((self.home / "lean-workers-called").exists())
+
+    def test_helper_absent_from_sums_skipped_with_warn_and_install_continues(self):
+        script_content = "#!/bin/sh\nexit 0\n"
+        digest = hashlib.sha256(script_content.encode("utf-8")).hexdigest()
+        sums = {"datacore": digest, "worker.sh": digest}
+        fetch_stub = (
+            "fetch() {\n"
+            "  case \"$1\" in\n"
+            "    */project.sh)\n"
+            "      touch \"$HOME/project-fetched\"\n"
+            "      return 1 ;;\n"
+            "    *)\n"
+            "      mkdir -p \"$(dirname \"$2\")\"\n"
+            "      printf '#!/bin/sh\\nexit 0\\n' > \"$2\" ;;\n"
+            "  esac\n"
+            "}\n"
+        )
+        result = self.run_install_command_step(sums, fetch_stub, cli_files="datacore lib/worker.sh lib/project.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.home / "project-fetched").exists())
+        self.assertFalse((self.home / "bin/lib/project.sh").exists())
+        self.assertIn("WARN not installed: project.sh — the matching 'datacore' subcommand will say it is unavailable", result.stdout)
+        self.assertIn("LEAN_WORKERS", result.stdout)
+        self.assertTrue((self.home / "lean-workers-called").exists())
+
+    def test_worker_helper_absent_from_sums_dies_with_installer_needs_message(self):
+        script_content = "#!/bin/sh\nexit 0\n"
+        digest = hashlib.sha256(script_content.encode("utf-8")).hexdigest()
+        sums = {"datacore": digest}
+        fetch_stub = (
+            "fetch() {\n"
+            "  mkdir -p \"$(dirname \"$2\")\"\n"
+            "  printf '#!/bin/sh\\nexit 0\\n' > \"$2\"\n"
+            "}\n"
+        )
+        result = self.run_install_command_step(sums, fetch_stub, cli_files="datacore lib/worker.sh")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("this release does not include worker.sh, which the installer needs", result.stderr)
+        self.assertIn("installer needs", result.stderr)
+        self.assertIn("Install stopped.", result.stderr)
+        self.assertFalse((self.home / "lean-workers-called").exists())
+
+    def test_retry_flags_appear_in_fetch_guarded_by_support_check(self):
+        fetch_code = function("fetch")
+        self.assertIn("--retry 5", fetch_code)
+        self.assertIn("--retry-delay 3", fetch_code)
+        self.assertIn("--retry-all-errors", fetch_code)
+        self.assertIn("curl --help all", fetch_code)
+
+        # 1. Curl supports --retry-all-errors: check flags passed and support detected only once.
+        curl_bin = self.home / "curl"
+        curl_bin.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *\"--help all\"*)\n"
+            "    echo 'check' >> \"$HOME/curl-help.log\"\n"
+            "    echo '  --retry-all-errors Retry all errors'\n"
+            "    exit 0 ;;\n"
+            "esac\n"
+            "printf '%s\\n' \"$*\" >> \"$HOME/curl-fetch.log\"\n"
+            "while [ $# -gt 0 ]; do\n"
+            "  if [ \"$1\" = '-o' ]; then touch \"$2\"; shift 2; else shift; fi\n"
+            "done\n"
+            "exit 0\n"
+        )
+        curl_bin.chmod(0o755)
+        res = shell(
+            f"PATH={shlex.quote(str(self.home))}:$PATH\n"
+            + "CURL_RETRY_CHECKED=''\nCURL_RETRY_FLAGS=''\n"
+            + function("fetch") + "\n"
+            + f"fetch http://example.com/one {shlex.quote(str(self.home / 'out1'))}\n"
+            + f"fetch http://example.com/two {shlex.quote(str(self.home / 'out2'))}\n",
+            self.home,
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        help_log = (self.home / "curl-help.log").read_text().splitlines()
+        self.assertEqual(len(help_log), 1, "support check must run only once across multiple fetches")
+        fetch_log = (self.home / "curl-fetch.log").read_text().splitlines()
+        self.assertEqual(len(fetch_log), 2)
+        for line in fetch_log:
+            self.assertIn("--retry 5", line)
+            self.assertIn("--retry-delay 3", line)
+            self.assertIn("--retry-all-errors", line)
+
+        # 2. Curl does not support --retry-all-errors.
+        curl_bin.write_text(
+            "#!/bin/sh\n"
+            "case \"$*\" in\n"
+            "  *\"--help all\"*)\n"
+            "    echo 'standard curl help without retry all errors'\n"
+            "    exit 0 ;;\n"
+            "esac\n"
+            "printf '%s\\n' \"$*\" >> \"$HOME/curl-fetch-noall.log\"\n"
+            "while [ $# -gt 0 ]; do\n"
+            "  if [ \"$1\" = '-o' ]; then touch \"$2\"; shift 2; else shift; fi\n"
+            "done\n"
+            "exit 0\n"
+        )
+        curl_bin.chmod(0o755)
+        res_noall = shell(
+            f"PATH={shlex.quote(str(self.home))}:$PATH\n"
+            + "CURL_RETRY_CHECKED=''\nCURL_RETRY_FLAGS=''\n"
+            + function("fetch") + "\n"
+            + f"fetch http://example.com/three {shlex.quote(str(self.home / 'out3'))}\n",
+            self.home,
+        )
+        self.assertEqual(res_noall.returncode, 0, res_noall.stderr)
+        fetch_log_noall = (self.home / "curl-fetch-noall.log").read_text().splitlines()
+        self.assertEqual(len(fetch_log_noall), 1)
+        self.assertIn("--retry 5", fetch_log_noall[0])
+        self.assertIn("--retry-delay 3", fetch_log_noall[0])
+        self.assertNotIn("--retry-all-errors", fetch_log_noall[0])
 
 
 if __name__ == "__main__":

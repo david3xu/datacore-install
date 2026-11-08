@@ -81,6 +81,8 @@ BUNDLE_DIR=""
 SUMS_FILE=""
 PREVIOUS_DIR=""
 WORKERS_SUMMARY="left as generated"
+CURL_RETRY_CHECKED=""
+CURL_RETRY_FLAGS=""
 # Declared here with the other install-wide state: the summary reads both, and under `set -u` an
 # install that somehow reached it without prepare_env would abort on the unset name instead.
 PROJECTS_MAPPED=0
@@ -250,7 +252,20 @@ sha256_of() {
   else die "Neither shasum nor sha256sum is available; cannot verify the download."; fi
 }
 
-fetch() { curl -fsSL --retry 3 -o "$2" "$1"; }
+fetch() {
+  if [ -z "${CURL_RETRY_CHECKED:-}" ]; then
+    CURL_RETRY_CHECKED=1
+    CURL_RETRY_FLAGS=""
+    if curl --help all 2>/dev/null | grep -q -- --retry-all-errors; then
+      CURL_RETRY_FLAGS="--retry-all-errors"
+    fi
+  fi
+  if [ -n "$CURL_RETRY_FLAGS" ]; then
+    curl -fsSL --retry 5 --retry-delay 3 "$CURL_RETRY_FLAGS" -o "$2" "$1"
+  else
+    curl -fsSL --retry 5 --retry-delay 3 -o "$2" "$1"
+  fi
+}
 
 # Move the `current` pointer to a version directory and prove it resolves there.
 #
@@ -938,13 +953,14 @@ install_command() {
   if [ "$VERSION" = latest ]; then _rel="$RELEASE_BASE/latest/download"
   else _rel="$RELEASE_BASE/download/$VERSION"; fi
 
-  # `datacore` itself has to be there; the lib/ helpers back one verb each. This script is served
-  # from main, so it can name a helper a release does not carry yet — losing `datacore uninstall`
-  # on such a release is worth reporting, not worth aborting an install whose stack is already up.
+  # A helper listed in SHA256SUMS is required: a download failure or checksum mismatch stops the
+  # install at this step with a clear reason. An unlisted helper stays optional: older releases
+  # that do not carry a newer helper are skipped without fetching (avoiding retries on 404) and
+  # warned at the end of this step. The worker helper (and datacore itself) is always required
+  # because the installer executes it during install; if absent from SHA256SUMS, die early.
   _downloaded=0
   _missing=''
   for _f in $CLI_FILES; do
-    case "$_f" in datacore) _required=1 ;; *) _required=0 ;; esac
     # Under `curl | sh` there is no script file: $0 is "sh", so dirname gives the user's CWD and a
     # stray file of the same name there would be installed. Only trust a sibling when $0 is a file.
     if [ -n "$SELF_DIR" ] && [ -f "$SELF_DIR/$_f" ]; then
@@ -952,28 +968,32 @@ install_command() {
       continue
     fi
     _name=$(basename "$_f")
-    _why=''
-    # An optional helper a release does not carry is reported by the line below, so keep curl's own
-    # "404" off the screen; a required file still shows curl's reason before the install stops.
-    if [ "$_required" = 1 ]; then _fetch_err=/dev/stderr; else _fetch_err=/dev/null; fi
-    if ! fetch "$_rel/$_name" "$BIN_DIR/$_f" 2>"$_fetch_err"; then
-      _why="this release does not carry $_name"
-    else
-      # These land on the user's PATH, so hold them to the same standard as the archive.
-      _want=$(grep " $_name\$" "$SUMS_FILE" 2>/dev/null | cut -d' ' -f1 || true)
-      _got=$(sha256_of "$BIN_DIR/$_f")
-      if [ -z "$_want" ]; then _why="SHA256SUMS does not list $_name"
-      elif [ "$_want" != "$_got" ]; then _why="checksum mismatch on $_name (expected $_want, actual $_got)"
-      fi
+    _url="$_rel/$_name"
+    _want=$(grep " $_name\$" "${SUMS_FILE:-/dev/null}" 2>/dev/null | head -1 | cut -d' ' -f1 || true)
+    if [ -z "$_want" ]; then
+      case "$_name" in
+        datacore|worker.sh)
+          die "this release does not include $_name, which the installer needs"
+          ;;
+        *)
+          _missing="${_missing:+$_missing, }$_name"
+          continue
+          ;;
+      esac
     fi
-    if [ -z "$_why" ]; then
-      _downloaded=1
-      continue
+    if ! fetch "$_url" "$BIN_DIR/$_f"; then
+      rm -f "$BIN_DIR/$_f"
+      die "Could not download $_name from $_url." \
+          "This release carries it, so the download failed: check your network or try again in a few minutes."
     fi
-    rm -f "$BIN_DIR/$_f"
-    [ "$_required" = 0 ] || die "Could not install $_name: $_why." \
-        "Check your network, or re-run the installer."
-    _missing="${_missing:+$_missing, }$_name"
+    _got=$(sha256_of "$BIN_DIR/$_f")
+    if [ "$_want" != "$_got" ]; then
+      rm -f "$BIN_DIR/$_f"
+      die "Checksum mismatch on $_name — refusing to install." \
+          "expected $_want" \
+          "actual   $_got"
+    fi
+    _downloaded=1
   done
   chmod +x "$BIN_DIR/datacore"
 
