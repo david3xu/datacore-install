@@ -511,6 +511,23 @@ class InstallFlowTests(unittest.TestCase):
         self.assertIn("Install stopped.", result.stderr)
         self.assertFalse((self.home / "lean-workers-called").exists())
 
+    def test_install_desktop_entry_absent_from_sums_dies_with_installer_needs_message(self):
+        script_content = "#!/bin/sh\nexit 0\n"
+        digest = hashlib.sha256(script_content.encode("utf-8")).hexdigest()
+        sums = {"datacore": digest}
+        fetch_stub = (
+            "fetch() {\n"
+            "  mkdir -p \"$(dirname \"$2\")\"\n"
+            "  printf '#!/bin/sh\\nexit 0\\n' > \"$2\"\n"
+            "}\n"
+        )
+        result = self.run_install_command_step(sums, fetch_stub, cli_files="datacore lib/install-desktop-entry.py")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("this release does not include install-desktop-entry.py, which the installer needs", result.stderr)
+        self.assertIn("installer needs", result.stderr)
+        self.assertIn("Install stopped.", result.stderr)
+        self.assertFalse((self.home / "lean-workers-called").exists())
+
     def test_retry_flags_appear_in_fetch_guarded_by_support_check(self):
         fetch_code = function("fetch")
         self.assertIn("--retry 5", fetch_code)

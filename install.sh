@@ -956,8 +956,8 @@ install_command() {
   # A helper listed in SHA256SUMS is required: a download failure or checksum mismatch stops the
   # install at this step with a clear reason. An unlisted helper stays optional: older releases
   # that do not carry a newer helper are skipped without fetching (avoiding retries on 404) and
-  # warned at the end of this step. The worker helper (and datacore itself) is always required
-  # because the installer executes it during install; if absent from SHA256SUMS, die early.
+  # warned at the end of this step. Installer-executed helpers (worker.sh, install-desktop-entry.py,
+  # and datacore itself) are always required; if absent from SHA256SUMS, die early.
   _downloaded=0
   _missing=''
   for _f in $CLI_FILES; do
@@ -972,7 +972,7 @@ install_command() {
     _want=$(grep " $_name\$" "${SUMS_FILE:-/dev/null}" 2>/dev/null | head -1 | cut -d' ' -f1 || true)
     if [ -z "$_want" ]; then
       case "$_name" in
-        datacore|worker.sh)
+        datacore|worker.sh|install-desktop-entry.py)
           die "this release does not include $_name, which the installer needs"
           ;;
         *)

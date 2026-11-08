@@ -376,12 +376,14 @@ jobs:
           # from matching any character.
           # Required and optional, split the way install.sh itself splits them. `datacore` is the
           # dispatcher and the archives are the product, so a release without one of those is
-          # broken. The lib/ helpers back one verb each, and install.sh is served from main, so it
-          # can legitimately name a helper a release does not carry yet -- it reports "this release
-          # does not carry <name>" and finishes an install whose stack is already up. A check that
-          # fails on that case contradicts the installer it is checking: adding `datacore report`
-          # to CLI_FILES turned this job red while every real install kept working. So report the
-          # lag, name the fix, and keep failing on anything a user genuinely cannot do without.
+          # broken. Helpers executed by the installer itself (worker.sh, install-desktop-entry.py)
+          # are always required. For other lib/ helpers, listed in SHA256SUMS means required, while
+          # an unlisted helper is skipped with a warning ("not installed: <name>") and finishes an
+          # install whose stack is already up. install.sh is served from main, so it can legitimately
+          # name a helper a release does not carry yet. A check that fails on that case contradicts
+          # the installer it is checking: adding `datacore report` to CLI_FILES turned this job red
+          # while every real install kept working. So report the lag, name the fix, and keep failing
+          # on anything a user genuinely cannot do without.
           missing=""
           printf 'datacore-local-edition-amd64.tar.gz\ndatacore-local-edition-arm64.tar.gz\nSHA256SUMS\ndatacore\n' > /tmp/want.txt
           while IFS= read -r want; do
