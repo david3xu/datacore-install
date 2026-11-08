@@ -36,7 +36,7 @@ So the asset set is not written down twice. `make-release.sh` derives it from `i
 Build both architectures first. A release with one architecture 404s for everyone on the other.
 
 ```bash
-sh make-release.sh v0.1.89 /path/to/bundle/latest/download
+sh make-release.sh v0.1.90 /path/to/bundle/latest/download
 ```
 
 It stages into `dist/<version>/`, writes `SHA256SUMS`, verifies its own output, and prints the
@@ -51,9 +51,9 @@ upload commands. It refuses to:
 It does not upload and does not publish. Both are deliberate.
 
 ```bash
-gh release upload v0.1.89 --repo <owner>/datacore-install dist/v0.1.89/* --clobber
-gh api repos/<owner>/datacore-install/releases/tags/v0.1.89 --jq '.assets[] | [.name, .state] | @tsv'
-gh release edit   v0.1.89 --repo <owner>/datacore-install --draft=false --latest
+gh release upload v0.1.90 --repo <owner>/datacore-install dist/v0.1.90/* --clobber
+gh api repos/<owner>/datacore-install/releases/tags/v0.1.90 --jq '.assets[] | [.name, .state] | @tsv'
+gh release edit   v0.1.90 --repo <owner>/datacore-install --draft=false --latest
 ```
 
 Before publishing, every staged asset must be present and have state `uploaded`. A failed upload
@@ -65,7 +65,7 @@ entry is not an attached file; retry it before making the release public.
 publication the tagged installer —
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.89/install.sh
+curl -fsSL https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.90/install.sh
 ```
 
 — returns `404`. A draft release is fully visible to you and invisible to everyone else, which is
@@ -75,8 +75,8 @@ Verify after publishing:
 
 ```bash
 curl -s -o /dev/null -w '%{http_code}\n' \
-  https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.89/install.sh      # expect 200
-gh api repos/<owner>/datacore-install/releases/latest --jq .tag_name               # expect v0.1.89
+  https://raw.githubusercontent.com/<owner>/datacore-install/v0.1.90/install.sh      # expect 200
+gh api repos/<owner>/datacore-install/releases/latest --jq .tag_name               # expect v0.1.90
 ```
 
 CI covers all of this in two jobs: *the pinned release is stated the same way everywhere* checks the

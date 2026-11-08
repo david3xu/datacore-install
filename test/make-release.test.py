@@ -62,50 +62,50 @@ class MakeReleaseGuardTests(unittest.TestCase):
         )
 
     def test_matching_versions_pass_guard(self):
-        build_fake_archive(self.bundle_dir / "datacore-local-edition-amd64.tar.gz", "0.1.89")
-        build_fake_archive(self.bundle_dir / "datacore-local-edition-arm64.tar.gz", "0.1.89")
+        build_fake_archive(self.bundle_dir / "datacore-local-edition-amd64.tar.gz", "0.1.90")
+        build_fake_archive(self.bundle_dir / "datacore-local-edition-arm64.tar.gz", "0.1.90")
 
-        result = self.run_make_release("v0.1.89", self.bundle_dir)
+        result = self.run_make_release("v0.1.90", self.bundle_dir)
         self.assertNotIn("Installer and bundle versions must match", result.stderr)
         self.assertNotIn("manifest is missing or unreadable", result.stderr)
         self.assertEqual(result.returncode, 0, f"make-release failed unexpectedly:\n{result.stderr}")
 
     def test_mismatched_version_exits_one_with_message(self):
         build_fake_archive(self.bundle_dir / "datacore-local-edition-amd64.tar.gz", "0.1.83")
-        build_fake_archive(self.bundle_dir / "datacore-local-edition-arm64.tar.gz", "0.1.89")
+        build_fake_archive(self.bundle_dir / "datacore-local-edition-arm64.tar.gz", "0.1.90")
 
-        result = self.run_make_release("v0.1.89", self.bundle_dir)
+        result = self.run_make_release("v0.1.90", self.bundle_dir)
         self.assertEqual(result.returncode, 1)
         expected_msg = (
-            "Bundle datacore-local-edition-amd64.tar.gz is 0.1.83 but this installer release is v0.1.89. "
-            "Installer and bundle versions must match: build bundle 0.1.89."
+            "Bundle datacore-local-edition-amd64.tar.gz is 0.1.83 but this installer release is v0.1.90. "
+            "Installer and bundle versions must match: build bundle 0.1.90."
         )
         self.assertIn(expected_msg, result.stderr)
 
     def test_arm64_mismatch_exits_one_with_message(self):
-        build_fake_archive(self.bundle_dir / "datacore-local-edition-amd64.tar.gz", "0.1.89")
+        build_fake_archive(self.bundle_dir / "datacore-local-edition-amd64.tar.gz", "0.1.90")
         build_fake_archive(self.bundle_dir / "datacore-local-edition-arm64.tar.gz", "0.1.83")
 
-        result = self.run_make_release("v0.1.89", self.bundle_dir)
+        result = self.run_make_release("v0.1.90", self.bundle_dir)
         self.assertEqual(result.returncode, 1)
         expected_msg = (
-            "Bundle datacore-local-edition-arm64.tar.gz is 0.1.83 but this installer release is v0.1.89. "
-            "Installer and bundle versions must match: build bundle 0.1.89."
+            "Bundle datacore-local-edition-arm64.tar.gz is 0.1.83 but this installer release is v0.1.90. "
+            "Installer and bundle versions must match: build bundle 0.1.90."
         )
         self.assertIn(expected_msg, result.stderr)
 
     def test_missing_manifest_exits_one(self):
-        build_fake_archive(self.bundle_dir / "datacore-local-edition-amd64.tar.gz", "0.1.89", has_manifest=False)
-        build_fake_archive(self.bundle_dir / "datacore-local-edition-arm64.tar.gz", "0.1.89")
+        build_fake_archive(self.bundle_dir / "datacore-local-edition-amd64.tar.gz", "0.1.90", has_manifest=False)
+        build_fake_archive(self.bundle_dir / "datacore-local-edition-arm64.tar.gz", "0.1.90")
 
-        result = self.run_make_release("v0.1.89", self.bundle_dir)
+        result = self.run_make_release("v0.1.90", self.bundle_dir)
         self.assertEqual(result.returncode, 1)
         self.assertIn("Bundle datacore-local-edition-amd64.tar.gz manifest is missing or unreadable.", result.stderr)
 
     def test_archive_without_dir_entries_nested_first_entry(self):
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-            dir_name = "datacore-local-edition-0.1.89"
+            dir_name = "datacore-local-edition-0.1.90"
             # Add a nested file as the first entry, without adding directory entries
             dummy_content = b"nested file content\n"
             ti_dummy = tarfile.TarInfo(f"{dir_name}/nested/file.txt")
@@ -115,7 +115,7 @@ class MakeReleaseGuardTests(unittest.TestCase):
             # Add manifest
             manifest_data = {
                 "product": "Datacore Local Edition",
-                "version": "0.1.89",
+                "version": "0.1.90",
             }
             content = json.dumps(manifest_data, indent=2).encode("utf-8") + b"\n"
             ti_file = tarfile.TarInfo(f"{dir_name}/manifest.json")
@@ -124,9 +124,9 @@ class MakeReleaseGuardTests(unittest.TestCase):
 
         dest_amd64 = self.bundle_dir / "datacore-local-edition-amd64.tar.gz"
         dest_amd64.write_bytes(buf.getvalue())
-        build_fake_archive(self.bundle_dir / "datacore-local-edition-arm64.tar.gz", "0.1.89")
+        build_fake_archive(self.bundle_dir / "datacore-local-edition-arm64.tar.gz", "0.1.90")
 
-        result = self.run_make_release("v0.1.89", self.bundle_dir)
+        result = self.run_make_release("v0.1.90", self.bundle_dir)
         self.assertNotIn("manifest is missing or unreadable", result.stderr)
         self.assertNotIn("Installer and bundle versions must match", result.stderr)
         self.assertEqual(result.returncode, 0, f"make-release failed unexpectedly:\n{result.stderr}")
