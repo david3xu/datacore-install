@@ -47,6 +47,37 @@ if [ "$pinned" != "$VERSION" ]; then
   exit 1
 fi
 
+# The installer version and bundle version must match in lockstep.
+for arch in amd64 arm64; do
+  name="datacore-local-edition-$arch.tar.gz"
+  archive="$BUNDLE_DIR/$name"
+  if [ ! -f "$archive" ]; then
+    echo "  MISSING  $name" >&2
+    echo >&2
+    echo "$BUNDLE_DIR does not contain $name. Build it before assembling the release;" >&2
+    echo "a release with one architecture 404s for everyone on the other." >&2
+    exit 1
+  fi
+  top_dir=$(tar -tzf "$archive" 2>/dev/null | head -n 1)
+  bver=""
+  if [ -n "$top_dir" ]; then
+    case "$top_dir" in
+      */) ;;
+      */*) top_dir="${top_dir%/*}/" ;;
+      *) top_dir="$top_dir/" ;;
+    esac
+    bver=$(tar -xOzf "$archive" "${top_dir}manifest.json" 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  fi
+  if [ -z "$bver" ]; then
+    printf 'Bundle %s manifest is missing or unreadable.\n' "$name" >&2
+    exit 1
+  fi
+  if [ "$bver" != "${VERSION#v}" ]; then
+    printf 'Bundle %s is %s but this installer release is %s. Installer and bundle versions must match: build bundle %s.\n' "$name" "$bver" "$VERSION" "${VERSION#v}" >&2
+    exit 1
+  fi
+done
+
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
   else shasum -a 256 "$1" | cut -d' ' -f1; fi

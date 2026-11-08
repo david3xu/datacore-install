@@ -56,6 +56,7 @@ class CliGuardTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("Usage: datacore backup [archive-path]", result.stdout)
                 self.assertIn("Stops the Datacore services", result.stdout)
+                self.assertIn("bundles before\n0.1.88 leave the services stopped", result.stdout)
                 self.assertFalse(self.backup_marker.exists())
 
     def test_restore_help_prints_usage_and_does_not_run_bundle_script(self):

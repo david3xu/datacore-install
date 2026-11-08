@@ -157,7 +157,7 @@ Usage: datacore backup [archive-path]
 Stops the Datacore services, writes a .tar.gz of the data directory
 (default: <install>/current/backups/datacore-local-backup-<timestamp>.tar.gz)
 and restarts the services that were running. Note that bundles before
-0.1.84 leave the services stopped; run `datacore start` afterwards.
+0.1.88 leave the services stopped; run `datacore start` afterwards.
 EOF
         exit 0
         ;;
