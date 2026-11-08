@@ -144,10 +144,21 @@ function parseDoctor(text) {
       else checks[checks.length - 1].detail.push(line);
     }
   }
-  const totals = summary.match(/^summary:\s+(\d+) ok, (\d+) fail, (\d+) skip \((\d+) total\)$/);
-  const complete = summaries === 1 && checks.length > 0 && totals
-    && ["ok", "fail", "skip"].every((status, i) => checks.filter((c) => c.status === status).length === Number(totals[i + 1]))
-    && checks.length === Number(totals[4]);
+  let totals = null;
+  const mWarn = summary.match(/^summary:\s+(\d+)\s+ok,\s+(\d+)\s+fail,\s+(\d+)\s+warn,\s+(\d+)\s+skip\s+\((\d+)\s+total\)$/);
+  const mOld = summary.match(/^summary:\s+(\d+)\s+ok,\s+(\d+)\s+fail,\s+(\d+)\s+skip\s+\((\d+)\s+total\)$/);
+  if (mWarn) {
+    totals = { ok: Number(mWarn[1]), fail: Number(mWarn[2]), warn: Number(mWarn[3]), skip: Number(mWarn[4]), total: Number(mWarn[5]) };
+  } else if (mOld) {
+    totals = { ok: Number(mOld[1]), fail: Number(mOld[2]), warn: 0, skip: Number(mOld[3]), total: Number(mOld[4]) };
+  }
+  const complete = summaries === 1 && checks.length > 0 && totals !== null
+    && checks.filter((c) => c.status === "ok").length === totals.ok
+    && checks.filter((c) => c.status === "fail").length === totals.fail
+    && checks.filter((c) => c.status === "warn").length === totals.warn
+    && checks.filter((c) => c.status === "skip").length === totals.skip
+    && totals.ok + totals.fail + totals.warn + totals.skip === totals.total
+    && checks.length === totals.total;
   return { checks, summary, complete: Boolean(complete) };
 }
 
@@ -189,6 +200,7 @@ const launchers = doctor.checks
 const health = read("health.txt").trim();
 const runtimeOk = /"?status"?\s*:\s*"?ok/i.test(health);
 const failing = count("fail");
+const warnings = count("warn");
 const launcherOk = launchers.filter((l) => l.status === "ok");
 
 const gates = [
@@ -213,6 +225,7 @@ const gates = [
     detail: !doctor.complete ? "doctor did not return a complete report; health is unknown"
       : failing > 0 ? `${failing} failing: ${doctor.checks.filter((c) => c.status === "fail").map((c) => c.name).join(", ")}`
       : doctorExit !== "0" ? `doctor exited with status ${doctorExit || "unknown"}; health is unknown`
+      : warnings > 0 ? `${doctor.summary} (warn: ${doctor.checks.filter((c) => c.status === "warn").map((c) => c.name).join(", ")})`
       : doctor.summary,
     fix: "datacore doctor" },
 ];

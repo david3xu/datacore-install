@@ -16,7 +16,9 @@
 set -eu
 
 ROOT="${DATACORE_INSTALL_ROOT:-$HOME/.datacore}"
-ENV_FILE="$ROOT/current/.env"
+C="$ROOT/current"
+ENV_FILE="$C/.env"
+COORD_ENV="$C/generated/coordinator.env"
 KEY=DATACORE_WORKER_PROJECT_WORKSPACES
 
 # The installer writes this when it has no real project to map, because the bundle's pre-flight
@@ -32,6 +34,7 @@ die()  { while [ $# -gt 0 ]; do printf '%s\n' "$1" >&2; shift; done; exit 1; }
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '  ✓ %s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*" >&2; }
+info() { printf '  · %s\n' "$*"; }
 
 find_bun() {
   if command -v bun >/dev/null 2>&1; then command -v bun; return 0; fi
@@ -73,9 +76,10 @@ map_tool() {
   _js="$_jsdir/map.js"
   cat > "$_js" <<'DATACORE_PROJECT_JS'
 // Datacore project-workspace map surgery. Invoked by `datacore project`.
-const { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } = require("fs");
+const { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSync } = require("fs");
 
 const FILE = process.env.DC_ENV_FILE;
+const COORD_FILE = process.env.DC_COORD_ENV;
 const KEY = process.env.DC_KEY;
 const PLACEHOLDER = process.env.DC_PLACEHOLDER;
 const PLACEHOLDER_DIR = process.env.DC_PLACEHOLDER_DIR;
@@ -179,10 +183,51 @@ if (!wrote) kept.push(line);
 const tmp = FILE + ".dc-project.tmp";
 writeFileSync(tmp, kept.join("\n"), { mode: 0o600 });
 renameSync(tmp, FILE);
+
+if (COORD_FILE && existsSync(COORD_FILE)) {
+  try {
+    const coordRaw = readFileSync(COORD_FILE, "utf8");
+    const coordLines = coordRaw.split("\n");
+    let quote = "";
+    for (const l of coordLines) {
+      if (l.startsWith(KEY + "=")) {
+        const val = l.slice(KEY.length + 1).trim();
+        if ((val.startsWith("'") && val.endsWith("'")) || (val.startsWith('"') && val.endsWith('"'))) {
+          quote = val[0];
+        }
+        break;
+      }
+    }
+    const jsonStr = JSON.stringify(map);
+    const newLine = KEY + "=" + (quote ? `${quote}${jsonStr}${quote}` : jsonStr);
+    let wroteCoord = false;
+    const keptCoord = [];
+    for (const l of coordLines) {
+      if (!l.startsWith(KEY + "=")) { keptCoord.push(l); continue; }
+      if (!wroteCoord) { keptCoord.push(newLine); wroteCoord = true; }
+    }
+    if (!wroteCoord) {
+      if (keptCoord.length > 0 && keptCoord[keptCoord.length - 1] === "") {
+        keptCoord[keptCoord.length - 1] = newLine;
+        keptCoord.push("");
+      } else {
+        keptCoord.push(newLine);
+      }
+    }
+    const coordTmp = COORD_FILE + ".dc-project.tmp";
+    writeFileSync(coordTmp, keptCoord.join("\n"), { mode: 0o600 });
+    try { chmodSync(coordTmp, 0o600); } catch (_) {}
+    renameSync(coordTmp, COORD_FILE);
+    try { chmodSync(COORD_FILE, 0o600); } catch (_) {}
+  } catch (e) {
+    // Missing or unwritable coordinator.env is tolerated.
+  }
+}
+
 report();
 DATACORE_PROJECT_JS
 
-  DC_ENV_FILE="$ENV_FILE" DC_KEY="$KEY" DC_PLACEHOLDER="$PLACEHOLDER_KEY" \
+  DC_ENV_FILE="$ENV_FILE" DC_COORD_ENV="$COORD_ENV" DC_KEY="$KEY" DC_PLACEHOLDER="$PLACEHOLDER_KEY" \
   DC_PLACEHOLDER_DIR="$PLACEHOLDER_DIR" DC_HOME="$HOME" \
     "$_bun" "$_js" "$@"
   # Clean up now rather than leaving it to the trap: the trap holds one path, so a second call to
@@ -425,6 +470,7 @@ case "$sub" in
     _out=$(map_tool link "$_name" "$_abs") || exit 1
     ok "$_name → $_abs"
     restart_bridge_if_running
+    [ -f "$COORD_ENV" ] && info "the Coordinator picks up the project map at its next start (datacore start); dispatch is unaffected meanwhile"
     say ""
     cmd_list
     ;;
@@ -435,6 +481,7 @@ case "$sub" in
     if _out=$(map_tool unlink "$1"); then
       ok "unmapped $1"
       restart_bridge_if_running
+      [ -f "$COORD_ENV" ] && info "the Coordinator picks up the project map at its next start (datacore start); dispatch is unaffected meanwhile"
       say ""
       cmd_list
     else

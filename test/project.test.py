@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Exercise `datacore project` git repository detection for normal repos, worktrees, plain dirs, and missing paths."""
 
+import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +13,25 @@ import unittest
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "lib" / "project.sh"
 RUNTIME = shutil.which("bun") or shutil.which("node")
+
+GIT_IDENTITY_ENV = {
+    "GIT_AUTHOR_NAME": "CI",
+    "GIT_AUTHOR_EMAIL": "ci@example.invalid",
+    "GIT_COMMITTER_NAME": "CI",
+    "GIT_COMMITTER_EMAIL": "ci@example.invalid",
+}
+
+
+def run_git(*args: str, env: dict | None = None, check: bool = True, **kwargs) -> subprocess.CompletedProcess:
+    git_env = {**os.environ, **GIT_IDENTITY_ENV}
+    if env is not None:
+        git_env.update(env)
+    return subprocess.run(
+        ["git", "-c", "user.name=CI", "-c", "user.email=ci@example.invalid", *args],
+        env=git_env,
+        check=check,
+        **kwargs,
+    )
 
 
 @unittest.skipUnless(RUNTIME, "Bun or Node is required to run project.sh map tool")
@@ -29,11 +50,14 @@ class ProjectWorktreeGitCheckTests(unittest.TestCase):
 
         self.env = {
             **os.environ,
+            **GIT_IDENTITY_ENV,
             "HOME": str(self.root),
             "TMPDIR": str(self.root),
             "DATACORE_INSTALL_ROOT": str(self.install),
             "PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
         }
+
+    run_git = staticmethod(run_git)
 
     def run_project(self, *args: str, env_override: dict | None = None) -> subprocess.CompletedProcess:
         env = self.env if env_override is None else env_override
@@ -49,7 +73,7 @@ class ProjectWorktreeGitCheckTests(unittest.TestCase):
     def test_a1_normal_repository_no_warning_and_unlabelled(self) -> None:
         repo = self.root / "repo-a1"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.run_git("init", "-q", str(repo))
 
         res_link = self.run_project("link", "proj-a1", str(repo))
         self.assertEqual(res_link.returncode, 0, f"link failed: {res_link.stderr}")
@@ -67,16 +91,10 @@ class ProjectWorktreeGitCheckTests(unittest.TestCase):
     def test_a2_linked_worktree_behaves_same_as_normal_repo(self) -> None:
         base_repo = self.root / "base-a2"
         base_repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(base_repo)], check=True)
-        subprocess.run(
-            ["git", "-C", str(base_repo), "commit", "--allow-empty", "-m", "init", "-q"],
-            check=True,
-        )
+        self.run_git("init", "-q", str(base_repo))
+        self.run_git("-C", str(base_repo), "commit", "--allow-empty", "-m", "init", "-q")
         worktree = self.root / "worktree-a2"
-        subprocess.run(
-            ["git", "-C", str(base_repo), "worktree", "add", "-q", str(worktree)],
-            check=True,
-        )
+        self.run_git("-C", str(base_repo), "worktree", "add", "-q", str(worktree))
 
         # Confirm that in a linked worktree, .git is a file, not a directory
         git_entry = worktree / ".git"
@@ -150,14 +168,14 @@ class ProjectWorktreeGitCheckTests(unittest.TestCase):
         # Prepare normal repo and linked worktree fixtures beforehand
         repo = self.root / "fallback-repo"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.run_git("init", "-q", str(repo))
 
         base = self.root / "fallback-base"
         base.mkdir()
-        subprocess.run(["git", "init", "-q", str(base)], check=True)
-        subprocess.run(["git", "-C", str(base), "commit", "--allow-empty", "-m", "init", "-q"], check=True)
+        self.run_git("init", "-q", str(base))
+        self.run_git("-C", str(base), "commit", "--allow-empty", "-m", "init", "-q")
         wt = self.root / "fallback-wt"
-        subprocess.run(["git", "-C", str(base), "worktree", "add", "-q", str(wt)], check=True)
+        self.run_git("-C", str(base), "worktree", "add", "-q", str(wt))
 
         plain = self.root / "fallback-plain"
         plain.mkdir()
@@ -182,7 +200,7 @@ class ProjectWorktreeGitCheckTests(unittest.TestCase):
 
         # Bare repo without git on PATH
         bare = self.root / "fallback-bare"
-        subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+        self.run_git("init", "--bare", "-q", str(bare))
         res_link_bare = self.run_project("link", "fb-bare", str(bare), env_override=no_git_env)
         self.assertEqual(res_link_bare.returncode, 0)
         self.assertIn("is not a git repository", res_link_bare.stderr)
@@ -203,7 +221,7 @@ class ProjectWorktreeGitCheckTests(unittest.TestCase):
     def test_e1_fake_stop_leaves_listener_pid_unchanged_warns_with_remediation_and_exits_nonzero(self) -> None:
         repo = self.root / "repo-e1"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.run_git("init", "-q", str(repo))
 
         listener_file = self.root / "listener_e1.txt"
         listener_file.write_text("1001\n")
@@ -261,7 +279,7 @@ exit 0
     def test_e2_listener_pid_changes_and_health_answers_restarts_bridge_and_exits_zero(self) -> None:
         repo = self.root / "repo-e2"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.run_git("init", "-q", str(repo))
 
         listener_file = self.root / "listener_e2.txt"
         listener_file.write_text("1001\n")
@@ -309,7 +327,7 @@ exit 0
     def test_e3_no_bridge_running_saves_mapping_says_nothing_about_restart(self) -> None:
         repo = self.root / "repo-e3"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.run_git("init", "-q", str(repo))
 
         lsof_shim = self.bin / "lsof"
         lsof_shim.write_text("""#!/bin/sh
@@ -343,7 +361,7 @@ exit 0
     def test_e4_bare_repository_labelled_not_git_repo_and_worktree_passes(self) -> None:
         # Bare repo check
         bare = self.root / "bare-e4"
-        subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+        self.run_git("init", "--bare", "-q", str(bare))
 
         res_bare = self.run_project("link", "proj-bare", str(bare))
         self.assertEqual(res_bare.returncode, 0)
@@ -358,10 +376,10 @@ exit 0
         # Linked worktree check
         base = self.root / "base-e4"
         base.mkdir()
-        subprocess.run(["git", "init", "-q", str(base)], check=True)
-        subprocess.run(["git", "-C", str(base), "commit", "--allow-empty", "-m", "init", "-q"], check=True)
+        self.run_git("init", "-q", str(base))
+        self.run_git("-C", str(base), "commit", "--allow-empty", "-m", "init", "-q")
         wt = self.root / "wt-e4"
-        subprocess.run(["git", "-C", str(base), "worktree", "add", "-q", str(wt)], check=True)
+        self.run_git("-C", str(base), "worktree", "add", "-q", str(wt))
 
         res_wt = self.run_project("link", "proj-wt", str(wt))
         self.assertEqual(res_wt.returncode, 0)
@@ -377,7 +395,7 @@ exit 0
         """Verify fallback to <temp DATACORE_HOME>/host-worker-bridge/host-worker-bridge.pid when lsof is unavailable."""
         repo = self.root / "repo-fb-lsof"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.run_git("init", "-q", str(repo))
 
         no_lsof_bin = self.root / "no_lsof_bin"
         no_lsof_bin.mkdir()
@@ -452,7 +470,7 @@ exit 0
         """Verify fallback uses overriding DATACORE_WORKER_BRIDGE_STATE_DIR when lsof is unavailable."""
         repo = self.root / "repo-fb-statedir"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.run_git("init", "-q", str(repo))
 
         no_lsof_bin = self.root / "no_lsof_bin_statedir"
         no_lsof_bin.mkdir()
@@ -522,7 +540,7 @@ exit 0
         """Verify remediation text on failed bridge restart contains no 'datacore restart'."""
         repo = self.root / "repo-remediation"
         repo.mkdir()
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        self.run_git("init", "-q", str(repo))
 
         listener_file = self.root / "listener_remediation.txt"
         listener_file.write_text("5001\n")
@@ -568,6 +586,113 @@ exit 0
         self.assertIn("project link", res.stdout)
         self.assertIn("project unlink", res.stdout)
         self.assertIn("exit 1 when the bridge does not restart", res.stdout)
+
+    def test_d4_coordinator_env_updated_on_link_and_unlink(self) -> None:
+        repo1 = self.root / "repo-d4-1"
+        repo1.mkdir()
+        self.run_git("init", "-q", str(repo1))
+
+        generated = self.install / "current" / "generated"
+        generated.mkdir(parents=True, exist_ok=True)
+        coord_env = generated / "coordinator.env"
+        coord_env.write_text("DATACORE_HTTP_PORT=43123\nDATACORE_WORKER_PROJECT_WORKSPACES={}\nSOME_OTHER_KEY=val\n")
+        coord_env.chmod(0o600)
+
+        res_link = self.run_project("link", "proj-d4", str(repo1))
+        self.assertEqual(res_link.returncode, 0, f"link failed: {res_link.stderr}")
+        self.assertIn("the Coordinator picks up the project map at its next start (datacore start); dispatch is unaffected meanwhile", res_link.stdout)
+
+        # File permissions preserved at 0600
+        self.assertEqual(coord_env.stat().st_mode & 0o777, 0o600)
+
+        # Verify coordinator.env holds the same map as .env
+        env_raw = (self.install / "current" / ".env").read_text()
+        coord_raw = coord_env.read_text()
+        self.assertIn("DATACORE_HTTP_PORT=43123\n", coord_raw)
+        self.assertIn("SOME_OTHER_KEY=val\n", coord_raw)
+
+        m_env = re.search(r"^DATACORE_WORKER_PROJECT_WORKSPACES=(.*)$", env_raw, re.MULTILINE)
+        m_coord = re.search(r"^DATACORE_WORKER_PROJECT_WORKSPACES=(.*)$", coord_raw, re.MULTILINE)
+        self.assertIsNotNone(m_env)
+        self.assertIsNotNone(m_coord)
+        map_env = json.loads(m_env.group(1).strip("'\""))
+        map_coord = json.loads(m_coord.group(1).strip("'\""))
+        self.assertEqual(map_env, map_coord)
+        self.assertEqual(map_coord.get("proj-d4"), str(repo1))
+
+        # Unlink proj-d4
+        res_unlink = self.run_project("unlink", "proj-d4")
+        self.assertEqual(res_unlink.returncode, 0, f"unlink failed: {res_unlink.stderr}")
+        self.assertIn("the Coordinator picks up the project map at its next start (datacore start); dispatch is unaffected meanwhile", res_unlink.stdout)
+        self.assertEqual(coord_env.stat().st_mode & 0o777, 0o600)
+
+        coord_raw_unlink = coord_env.read_text()
+        env_raw_unlink = (self.install / "current" / ".env").read_text()
+        m_env_un = re.search(r"^DATACORE_WORKER_PROJECT_WORKSPACES=(.*)$", env_raw_unlink, re.MULTILINE)
+        m_coord_un = re.search(r"^DATACORE_WORKER_PROJECT_WORKSPACES=(.*)$", coord_raw_unlink, re.MULTILINE)
+        self.assertIsNotNone(m_env_un)
+        self.assertIsNotNone(m_coord_un)
+        map_env_un = json.loads(m_env_un.group(1).strip("'\""))
+        map_coord_un = json.loads(m_coord_un.group(1).strip("'\""))
+        self.assertEqual(map_env_un, map_coord_un)
+        self.assertNotIn("proj-d4", map_coord_un)
+
+    def test_d4_missing_coordinator_env_tolerated(self) -> None:
+        repo = self.root / "repo-d4-missing"
+        repo.mkdir()
+        self.run_git("init", "-q", str(repo))
+
+        coord_env = self.install / "current" / "generated" / "coordinator.env"
+        self.assertFalse(coord_env.exists())
+
+        res_link = self.run_project("link", "proj-missing", str(repo))
+        self.assertEqual(res_link.returncode, 0, f"link failed: {res_link.stderr}")
+        self.assertFalse(coord_env.exists())
+        self.assertNotIn("the Coordinator picks up the project map", res_link.stdout)
+
+        res_unlink = self.run_project("unlink", "proj-missing")
+        self.assertEqual(res_unlink.returncode, 0, f"unlink failed: {res_unlink.stderr}")
+        self.assertFalse(coord_env.exists())
+        self.assertNotIn("the Coordinator picks up the project map", res_unlink.stdout)
+
+    def test_d4_coordinator_env_appended_if_missing_from_file(self) -> None:
+        repo = self.root / "repo-d4-append"
+        repo.mkdir()
+        self.run_git("init", "-q", str(repo))
+
+        generated = self.install / "current" / "generated"
+        generated.mkdir(parents=True, exist_ok=True)
+        coord_env = generated / "coordinator.env"
+        coord_env.write_text("DATACORE_HTTP_PORT=43123\n")
+        coord_env.chmod(0o600)
+
+        res_link = self.run_project("link", "proj-append", str(repo))
+        self.assertEqual(res_link.returncode, 0, f"link failed: {res_link.stderr}")
+        self.assertEqual(coord_env.stat().st_mode & 0o777, 0o600)
+
+        coord_raw = coord_env.read_text()
+        self.assertIn("DATACORE_HTTP_PORT=43123\n", coord_raw)
+        m_coord = re.search(r"^DATACORE_WORKER_PROJECT_WORKSPACES=(.*)$", coord_raw, re.MULTILINE)
+        self.assertIsNotNone(m_coord)
+        map_coord = json.loads(m_coord.group(1).strip("'\""))
+        self.assertEqual(map_coord.get("proj-append"), str(repo))
+
+    def test_d4_coordinator_env_preserves_single_quoting_style(self) -> None:
+        repo = self.root / "repo-d4-quoted"
+        repo.mkdir()
+        self.run_git("init", "-q", str(repo))
+
+        generated = self.install / "current" / "generated"
+        generated.mkdir(parents=True, exist_ok=True)
+        coord_env = generated / "coordinator.env"
+        coord_env.write_text("DATACORE_WORKER_PROJECT_WORKSPACES='{}'\n")
+        coord_env.chmod(0o600)
+
+        res_link = self.run_project("link", "proj-quoted", str(repo))
+        self.assertEqual(res_link.returncode, 0, f"link failed: {res_link.stderr}")
+
+        coord_raw = coord_env.read_text()
+        self.assertIn("DATACORE_WORKER_PROJECT_WORKSPACES='{", coord_raw)
 
 
 if __name__ == "__main__":

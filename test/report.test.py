@@ -123,6 +123,52 @@ esac
         self.assertIn("executor_config:file_present", html)
         self.assertNotIn(token, html)
 
+    def test_new_summary_form_with_zero_warn_gives_ready(self) -> None:
+        doctor = (
+            "✓ OK runtime:health\n"
+            "✓ OK bridge_dispatch:launcher:muse\n"
+            "summary: 2 ok, 0 fail, 0 warn, 0 skip (2 total)\n"
+        )
+        stdout, html = self.report(doctor)
+        self.assertIn("Verdict: ready — preflight only", stdout)
+        self.assertIn("Doctor completed without failures", html)
+
+    def test_new_summary_form_with_warn_greater_than_zero_gives_ready_with_warn_named_in_detail(self) -> None:
+        doctor = (
+            "✓ OK runtime:health\n"
+            "✓ OK bridge_dispatch:launcher:muse\n"
+            "! WARN compose_workspace:dir\n"
+            "    single-source mode\n"
+            "summary: 2 ok, 0 fail, 1 warn, 0 skip (3 total)\n"
+        )
+        stdout, html = self.report(doctor)
+        self.assertIn("Verdict: ready — preflight only", stdout)
+        self.assertIn("compose_workspace:dir", html)
+        self.assertIn("summary: 2 ok, 0 fail, 1 warn, 0 skip (3 total) (warn: compose_workspace:dir)", html)
+
+    def test_new_summary_form_with_mismatched_count_gives_not_complete(self) -> None:
+        for doctor in [
+            (
+                "✓ OK runtime:health\n"
+                "✓ OK bridge_dispatch:launcher:muse\n"
+                "summary: 2 ok, 0 fail, 1 warn, 0 skip (3 total)\n"
+            ),
+            (
+                "✓ OK runtime:health\n"
+                "✓ OK bridge_dispatch:launcher:muse\n"
+                "summary: 3 ok, 0 fail, 0 warn, 0 skip (3 total)\n"
+            ),
+            (
+                "✓ OK runtime:health\n"
+                "✓ OK bridge_dispatch:launcher:muse\n"
+                "summary: 2 ok, 0 fail, 0 warn, 0 skip (3 total)\n"
+            ),
+        ]:
+            with self.subTest(doctor=doctor):
+                stdout, html = self.report(doctor)
+                self.assertNotIn("Verdict: ready", stdout)
+                self.assertIn("doctor did not return a complete report", html)
+
 
 if __name__ == "__main__":
     unittest.main()
