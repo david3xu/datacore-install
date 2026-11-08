@@ -589,6 +589,7 @@ readState();
 // happens to be installed -- the opposite error from the one being fixed here.
 const priorRegistries = [];
 const priorCatalogues = [];
+let priorVersionDir = null;
 {
   const mirror = process.env.DATACORE_WORKER_PRIOR_REGISTRY || "";
   if (mirror) priorRegistries.push(mirror);
@@ -615,6 +616,7 @@ const priorCatalogues = [];
         .map((dir) => ({ dir, at: statSync(dir).mtimeMs }))
         .sort((a, b) => b.at - a.at)
         .slice(0, 1);
+      if (prior.length > 0) priorVersionDir = prior[0].dir;
       for (const { dir } of prior) {
         priorCatalogues.push(join(dir, "generated", "azure-worker-catalogue.json"));
         priorRegistries.push(join(dir, "generated", "azure-worker-registry.json"));
@@ -741,6 +743,23 @@ if (cmd === "prune") {
   // rest = CLI binaries that resolve on this machine, as the family `cli` names them.
   const present = new Set(rest.filter(Boolean));
 
+  let beforeIds = null;
+  const prevWorkersMap = new Map();
+  if (priorVersionDir) {
+    const prevRegPath = join(priorVersionDir, "generated", "azure-worker-registry.json");
+    if (existsSync(prevRegPath)) {
+      try {
+        const prevDoc = read(prevRegPath);
+        for (const w of (prevDoc && prevDoc.workers) || []) {
+          if (w && w.agent_id && !isInfra(w)) {
+            prevWorkersMap.set(w.agent_id, w);
+          }
+        }
+        beforeIds = new Set(prevWorkersMap.keys());
+      } catch {}
+    }
+  }
+
   // Families the user went out of their way to enable. install.sh runs `prune` on EVERY install,
   // upgrades included, and an upgrade re-mints the registry with the full set -- so a prune that
   // keeps only default-profile families deleted, on every upgrade, exactly the workers somebody
@@ -827,6 +846,39 @@ if (cmd === "prune") {
   writeRegistry(registry, { choose: migrated });
   const n = summarise(registry.workers);
   console.log(`  ${n} worker(s) enabled of ${catalogue.workers.filter((w) => !isInfra(w)).length} the bundle minted`);
+
+  if (beforeIds !== null) {
+    const afterIds = new Set(keep.map((w) => w.agent_id));
+    const added = [...afterIds].filter((id) => !beforeIds.has(id)).sort();
+    const removed = [...beforeIds].filter((id) => !afterIds.has(id)).sort();
+    if (added.length > 0 || removed.length > 0) {
+      console.log("  ! this update changed which workers are enabled:");
+      for (const id of added) {
+        console.log(`      + ${id}   (enabled now; was off)`);
+      }
+      for (const id of removed) {
+        const prevW = prevWorkersMap.get(id);
+        const fam = (prevW && familyOf(prevW)) || id.split("@")[0];
+        const meta = fams.get(fam) || {};
+        const inCat = catalogue.workers.some((w) => w.agent_id === id);
+        let reason = "";
+        if (!inCat || !fams.has(fam)) {
+          reason = "the identity is missing from the new bundle";
+        } else if (disabled.has(fam)) {
+          reason = "the family is in disabled";
+        } else {
+          const cli = meta.cli || (prevW && prevW.cli) || ((catalogue.workers.find((w) => w.agent_id === id) || {}).cli);
+          if (cli && !present.has(cli)) {
+            reason = "the CLI is not on PATH";
+          }
+        }
+        const suffix = reason ? `: ${reason}` : "";
+        console.log(`      - ${id}   (was enabled; now off${suffix})`);
+      }
+      console.log("    keep a worker off for good: datacore worker remove <family>; turn one back on: datacore worker add <id>");
+    }
+  }
+
   process.exit(0);
 }
 

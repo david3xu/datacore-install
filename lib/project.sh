@@ -76,7 +76,7 @@ map_tool() {
   _js="$_jsdir/map.js"
   cat > "$_js" <<'DATACORE_PROJECT_JS'
 // Datacore project-workspace map surgery. Invoked by `datacore project`.
-const { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSync } = require("fs");
+const { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, chmodSync, unlinkSync, accessSync, constants } = require("fs");
 
 const FILE = process.env.DC_ENV_FILE;
 const COORD_FILE = process.env.DC_COORD_ENV;
@@ -122,6 +122,8 @@ if (hits.length) {
   }
 }
 
+let coordResult = "none";
+
 function report() {
   const all = Object.entries(map);
   const entries = all.filter(([k, v]) => k !== PLACEHOLDER && !isLegacyStandIn(k, v));
@@ -131,6 +133,7 @@ function report() {
     parseError,
     placeholder: PLACEHOLDER in map,
     legacy: all.some(([k, v]) => isLegacyStandIn(k, v)),
+    coordResult,
   }));
 }
 
@@ -185,7 +188,9 @@ writeFileSync(tmp, kept.join("\n"), { mode: 0o600 });
 renameSync(tmp, FILE);
 
 if (COORD_FILE && existsSync(COORD_FILE)) {
+  const coordTmp = COORD_FILE + ".dc-project.tmp";
   try {
+    accessSync(COORD_FILE, constants.W_OK);
     const coordRaw = readFileSync(COORD_FILE, "utf8");
     const coordLines = coordRaw.split("\n");
     let quote = "";
@@ -214,13 +219,14 @@ if (COORD_FILE && existsSync(COORD_FILE)) {
         keptCoord.push(newLine);
       }
     }
-    const coordTmp = COORD_FILE + ".dc-project.tmp";
     writeFileSync(coordTmp, keptCoord.join("\n"), { mode: 0o600 });
     try { chmodSync(coordTmp, 0o600); } catch (_) {}
     renameSync(coordTmp, COORD_FILE);
     try { chmodSync(COORD_FILE, 0o600); } catch (_) {}
+    coordResult = "ok";
   } catch (e) {
-    // Missing or unwritable coordinator.env is tolerated.
+    try { unlinkSync(coordTmp); } catch (_) {}
+    coordResult = "error";
   }
 }
 
@@ -470,7 +476,12 @@ case "$sub" in
     _out=$(map_tool link "$_name" "$_abs") || exit 1
     ok "$_name → $_abs"
     restart_bridge_if_running
-    [ -f "$COORD_ENV" ] && info "the Coordinator picks up the project map at its next start (datacore start); dispatch is unaffected meanwhile"
+    _cr=$(report_field coordResult "$_out")
+    if [ "$_cr" = "ok" ]; then
+      info "the Coordinator picks up the project map at its next start (datacore start); dispatch is unaffected meanwhile"
+    elif [ "$_cr" = "error" ]; then
+      warn "could not update $COORD_ENV; the Coordinator keeps its old project map until the next install (dispatch is unaffected)"
+    fi
     say ""
     cmd_list
     ;;
@@ -481,7 +492,12 @@ case "$sub" in
     if _out=$(map_tool unlink "$1"); then
       ok "unmapped $1"
       restart_bridge_if_running
-      [ -f "$COORD_ENV" ] && info "the Coordinator picks up the project map at its next start (datacore start); dispatch is unaffected meanwhile"
+      _cr=$(report_field coordResult "$_out")
+      if [ "$_cr" = "ok" ]; then
+        info "the Coordinator picks up the project map at its next start (datacore start); dispatch is unaffected meanwhile"
+      elif [ "$_cr" = "error" ]; then
+        warn "could not update $COORD_ENV; the Coordinator keeps its old project map until the next install (dispatch is unaffected)"
+      fi
       say ""
       cmd_list
     else

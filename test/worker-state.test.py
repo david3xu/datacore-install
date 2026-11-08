@@ -294,6 +294,43 @@ class WorkerStateTests(unittest.TestCase):
         self.f.run("prune")
         self.assertFalse(any(x.startswith("muse") for x in self.f.ids()))
 
+    def test_d19_upgrade_same_worker_set_prints_no_warning_block(self):
+        save(self.f.registry, {"workers": DEFAULT})
+        self.f.version("new")
+        result = self.f.run("prune")
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("this update changed which workers are enabled:", result.stdout)
+
+    def test_d19_upgrade_removed_worker_shows_warning_block(self):
+        save(self.f.registry, {"workers": DEFAULT + [OPT_IN[0]]})
+        self.f.set_clis("codex")
+        self.f.version("new")
+        result = self.f.run("prune")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("  ! this update changed which workers are enabled:", result.stdout)
+        self.assertIn(f"      - {OPT_IN[0]['agent_id']}   (was enabled; now off: the CLI is not on PATH)", result.stdout)
+        self.assertIn("    keep a worker off for good: datacore worker remove <family>; turn one back on: datacore worker add <id>", result.stdout)
+
+    def test_d19_upgrade_added_worker_shows_warning_block(self):
+        save(self.f.registry, {"workers": DEFAULT})
+        save(self.f.state, {"version": 1, "chosen": ["muse-worker"], "disabled": [], "identities": [OPT_IN[0]]})
+        self.f.set_clis("codex", "muse")
+        self.f.version("new", workers=DEFAULT + OPT_IN)
+        result = self.f.run("prune")
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("  ! this update changed which workers are enabled:", result.stdout)
+        self.assertIn(f"      + {OPT_IN[0]['agent_id']}   (enabled now; was off)", result.stdout)
+        self.assertIn("    keep a worker off for good: datacore worker remove <family>; turn one back on: datacore worker add <id>", result.stdout)
+
+    def test_d19_fresh_install_prints_no_warning_block(self):
+        fresh_root = Path(self.temp.name) / "fresh-test"
+        fresh_root.mkdir()
+        fresh = Fixture(fresh_root)
+        fresh.version("fresh")
+        result = fresh.run("prune")
+        self.assertEqual(result.returncode, 0)
+        self.assertNotIn("this update changed which workers are enabled:", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -309,6 +309,22 @@ class InstallFlowTests(unittest.TestCase):
         self.assertIn("worker configuration synced", result.stdout)
         self.assertIn("SUMMARY 2 enabled", result.stdout)
 
+    def test_lean_workers_passes_through_worker_change_warning(self):
+        result = self.run_worker_install_step(
+            "case \"$1\" in\n"
+            "prune)\n"
+            "  echo '  1 worker(s) enabled of 4 the bundle minted'\n"
+            "  echo '  ! this update changed which workers are enabled:'\n"
+            "  echo '      - codex-worker@default   (was enabled; now off: the CLI is not on PATH)'\n"
+            "  echo '    keep a worker off for good: datacore worker remove <family>; turn one back on: datacore worker add <id>'\n"
+            "  exit 0 ;;\n"
+            "sync) echo 'worker configuration synced'; exit 0 ;;\nesac\n"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("this update changed which workers are enabled:", result.stdout)
+        self.assertIn("- codex-worker@default", result.stdout)
+        self.assertIn("SUMMARY 1 enabled", result.stdout)
+
     def test_missing_worker_helper_stops_install(self):
         result = self.run_worker_install_step(None)
         self.assertNotEqual(result.returncode, 0)

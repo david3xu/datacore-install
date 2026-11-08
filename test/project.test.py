@@ -694,6 +694,43 @@ exit 0
         coord_raw = coord_env.read_text()
         self.assertIn("DATACORE_WORKER_PROJECT_WORKSPACES='{", coord_raw)
 
+    def test_d4_readonly_coordinator_env_warns_and_continues_with_exit_0(self) -> None:
+        repo = self.root / "repo-d4-ro"
+        repo.mkdir()
+        self.run_git("init", "-q", str(repo))
+
+        generated = self.install / "current" / "generated"
+        generated.mkdir(parents=True, exist_ok=True)
+        coord_env = generated / "coordinator.env"
+        coord_env.write_text("DATACORE_WORKER_PROJECT_WORKSPACES='{\"old\":\"/tmp\"}'\n")
+        coord_env.chmod(0o400)
+        try:
+            res_link = self.run_project("link", "proj-ro", str(repo))
+            self.assertEqual(res_link.returncode, 0, f"link failed: {res_link.stderr}")
+            self.assertNotIn("the Coordinator picks up the project map", res_link.stdout)
+            self.assertIn(
+                f"could not update {coord_env}; the Coordinator keeps its old project map until the next install (dispatch is unaffected)",
+                res_link.stderr,
+            )
+            # Coordinator env was not modified
+            coord_raw = coord_env.read_text()
+            self.assertIn('"old":"/tmp"', coord_raw)
+            self.assertNotIn("proj-ro", coord_raw)
+            # .env was updated
+            env_raw = (self.install / "current" / ".env").read_text()
+            self.assertIn("proj-ro", env_raw)
+
+            # Also verify unlink on read-only coordinator.env
+            res_unlink = self.run_project("unlink", "proj-ro")
+            self.assertEqual(res_unlink.returncode, 0, f"unlink failed: {res_unlink.stderr}")
+            self.assertNotIn("the Coordinator picks up the project map", res_unlink.stdout)
+            self.assertIn(
+                f"could not update {coord_env}; the Coordinator keeps its old project map until the next install (dispatch is unaffected)",
+                res_unlink.stderr,
+            )
+        finally:
+            coord_env.chmod(0o600)
+
 
 if __name__ == "__main__":
     unittest.main()
