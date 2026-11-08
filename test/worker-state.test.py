@@ -52,6 +52,7 @@ class Fixture:
         self.home = root / "home"
         self.data = root / "data"
         self.state = self.data / "worker-state.json"
+        self.transition = self.data / "worker-transition.json"
         self.mirror = self.data / "runtime" / "worker-registry.json"
         self.executors = self.data / "coordinator" / "executors.json"
         self.bin = root / "bin"
@@ -330,6 +331,66 @@ class WorkerStateTests(unittest.TestCase):
         result = fresh.run("prune")
         self.assertEqual(result.returncode, 0)
         self.assertNotIn("this update changed which workers are enabled:", result.stdout)
+        self.assertFalse(fresh.transition.exists())
+
+    def test_d19_consecutive_prunes_report_transition_only_once(self):
+        save(self.f.registry, {"workers": DEFAULT + [OPT_IN[0]]})
+        self.f.set_clis("codex")
+        self.f.version("new")
+        res1 = self.f.run("prune")
+        self.assertEqual(res1.returncode, 0)
+        self.assertIn("  ! this update changed which workers are enabled:", res1.stdout)
+        self.assertIn(f"      - {OPT_IN[0]['agent_id']}   (was enabled; now off: the CLI is not on PATH)", res1.stdout)
+        self.assertTrue(self.f.transition.exists())
+        self.assertEqual(self.f.transition.stat().st_mode & 0o777, 0o600)
+        marker = json.loads(self.f.transition.read_text())
+        self.assertEqual(marker["version"], 1)
+        self.assertEqual(marker["prior"], str((self.f.root / "versions" / "old").resolve()))
+        self.assertEqual(marker["current"], str((self.f.root / "versions" / "new").resolve()))
+
+        res2 = self.f.run("prune")
+        self.assertEqual(res2.returncode, 0)
+        self.assertNotIn("this update changed which workers are enabled:", res2.stdout)
+
+    def test_d19_new_transition_reports_change_again(self):
+        save(self.f.registry, {"workers": DEFAULT + [OPT_IN[0]]})
+        self.f.set_clis("codex")
+        self.f.version("new")
+        res1 = self.f.run("prune")
+        self.assertIn("  ! this update changed which workers are enabled:", res1.stdout)
+
+        res2 = self.f.run("prune")
+        self.assertNotIn("this update changed which workers are enabled:", res2.stdout)
+
+        self.f.set_clis()
+        self.f.version("newer")
+        res3 = self.f.run("prune")
+        self.assertEqual(res3.returncode, 0)
+        self.assertIn("  ! this update changed which workers are enabled:", res3.stdout)
+        self.assertIn(f"      - {DEFAULT[0]['agent_id']}   (was enabled; now off: the CLI is not on PATH)", res3.stdout)
+        marker = json.loads(self.f.transition.read_text())
+        self.assertEqual(marker["version"], 1)
+        self.assertEqual(marker["prior"], str((self.f.root / "versions" / "new").resolve()))
+        self.assertEqual(marker["current"], str((self.f.root / "versions" / "newer").resolve()))
+
+        res4 = self.f.run("prune")
+        self.assertEqual(res4.returncode, 0)
+        self.assertNotIn("this update changed which workers are enabled:", res4.stdout)
+
+    def test_d19_corrupt_marker_file_still_compares_and_does_not_crash(self):
+        save(self.f.registry, {"workers": DEFAULT + [OPT_IN[0]]})
+        self.f.set_clis("codex")
+        self.f.version("new")
+        self.f.transition.parent.mkdir(parents=True, exist_ok=True)
+        self.f.transition.write_text("{corrupt json marker content---\n")
+        res = self.f.run("prune")
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("  ! this update changed which workers are enabled:", res.stdout)
+        self.assertIn(f"      - {OPT_IN[0]['agent_id']}   (was enabled; now off: the CLI is not on PATH)", res.stdout)
+        marker = json.loads(self.f.transition.read_text())
+        self.assertEqual(marker["version"], 1)
+        self.assertEqual(marker["prior"], str((self.f.root / "versions" / "old").resolve()))
+        self.assertEqual(marker["current"], str((self.f.root / "versions" / "new").resolve()))
 
 
 if __name__ == "__main__":

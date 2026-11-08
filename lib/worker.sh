@@ -45,6 +45,7 @@ RUNTIME_REGISTRY="${DATACORE_WORKER_REGISTRY_PATH:-$DATA_HOME/runtime/worker-reg
 # Deliberately NOT under $DATA_HOME/runtime: the bundle's own installer regenerates that directory
 # during an install, which is what makes the registry mirror useless as a record of a choice.
 WORKER_STATE="${DATACORE_WORKER_STATE_PATH:-$DATA_HOME/worker-state.json}"
+WORKER_TRANSITION="${DATACORE_WORKER_TRANSITION_PATH:-$DATA_HOME/worker-transition.json}"
 MIRRORS="$RUNTIME_REGISTRY"
 
 # The compose project names the workspace directory. The datacore dispatcher exports it after
@@ -353,6 +354,42 @@ function writeRegistry(doc, opts) {
   writeExecutors(doc);
 }
 
+// ---- worker transition marker -------------------------------------------------------------------
+//
+// Records which bundle-to-bundle transition prune last compared and reported, so each transition
+// is announced at most once. Subsequent prunes on the same version, same-version reinstalls, and
+// `datacore update` re-runs skip the comparison when the marker matches.
+const TRANSITION_PATH = process.env.DATACORE_WORKER_TRANSITION ||
+  (STATE_PATH ? join(dirname(STATE_PATH), "worker-transition.json") : "");
+
+function readTransition() {
+  if (!TRANSITION_PATH || !existsSync(TRANSITION_PATH)) return null;
+  try {
+    const doc = read(TRANSITION_PATH);
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) return null;
+    if (doc.version !== 1) return null;
+    if (typeof doc.prior !== "string" || !doc.prior) return null;
+    if (typeof doc.current !== "string" || !doc.current) return null;
+    return doc;
+  } catch {
+    return null;
+  }
+}
+
+function writeTransition(prior, current) {
+  if (!TRANSITION_PATH || !prior || !current) return;
+  const tmp = `${TRANSITION_PATH}.tmp.${process.pid}`;
+  try {
+    mkdirSync(dirname(TRANSITION_PATH), { recursive: true });
+    writeFileSync(tmp, JSON.stringify({ version: 1, prior, current }, null, 2) + "\n",
+                  { encoding: "utf8", mode: 0o600 });
+    try { chmodSync(tmp, 0o600); } catch {}
+    renameSync(tmp, TRANSITION_PATH);
+  } catch {
+    try { unlinkSync(tmp); } catch {}
+  }
+}
+
 // ---- executor profiles --------------------------------------------------------------------------
 //
 // The Coordinator refuses to dispatch a task unless an executor profile matches its target agent,
@@ -590,12 +627,20 @@ readState();
 const priorRegistries = [];
 const priorCatalogues = [];
 let priorVersionDir = null;
+let priorReal = null;
+let currentReal = null;
 {
   const mirror = process.env.DATACORE_WORKER_PRIOR_REGISTRY || "";
   if (mirror) priorRegistries.push(mirror);
 
   const versionsDir = process.env.DATACORE_WORKER_VERSIONS_DIR || "";
-  const currentBundle = process.env.DATACORE_WORKER_CURRENT_BUNDLE || "";
+  let currentBundle = process.env.DATACORE_WORKER_CURRENT_BUNDLE || "";
+  if (!currentBundle && registryPath) {
+    try { currentBundle = dirname(dirname(registryPath)); } catch {}
+  }
+  if (currentBundle) {
+    try { currentReal = realpathSync(currentBundle); } catch { currentReal = currentBundle; }
+  }
   if (versionsDir && existsSync(versionsDir)) {
     try {
       // Resolved, not compared as written. $ROOT/versions holds a `current` symlink alongside the
@@ -609,14 +654,17 @@ let priorVersionDir = null;
           try { return realpathSync(join(versionsDir, name)); } catch { return ""; }
         })
         .filter((dir) => {
-          if (!dir || dir === currentBundle || seen.has(dir)) return false;
+          if (!dir || dir === currentBundle || dir === currentReal || seen.has(dir)) return false;
           seen.add(dir);
           try { return statSync(dir).isDirectory(); } catch { return false; }
         })
         .map((dir) => ({ dir, at: statSync(dir).mtimeMs }))
         .sort((a, b) => b.at - a.at)
         .slice(0, 1);
-      if (prior.length > 0) priorVersionDir = prior[0].dir;
+      if (prior.length > 0) {
+        priorVersionDir = prior[0].dir;
+        try { priorReal = realpathSync(priorVersionDir); } catch { priorReal = priorVersionDir; }
+      }
       for (const { dir } of prior) {
         priorCatalogues.push(join(dir, "generated", "azure-worker-catalogue.json"));
         priorRegistries.push(join(dir, "generated", "azure-worker-registry.json"));
@@ -847,35 +895,40 @@ if (cmd === "prune") {
   const n = summarise(registry.workers);
   console.log(`  ${n} worker(s) enabled of ${catalogue.workers.filter((w) => !isInfra(w)).length} the bundle minted`);
 
-  if (beforeIds !== null) {
-    const afterIds = new Set(keep.map((w) => w.agent_id));
-    const added = [...afterIds].filter((id) => !beforeIds.has(id)).sort();
-    const removed = [...beforeIds].filter((id) => !afterIds.has(id)).sort();
-    if (added.length > 0 || removed.length > 0) {
-      console.log("  ! this update changed which workers are enabled:");
-      for (const id of added) {
-        console.log(`      + ${id}   (enabled now; was off)`);
-      }
-      for (const id of removed) {
-        const prevW = prevWorkersMap.get(id);
-        const fam = (prevW && familyOf(prevW)) || id.split("@")[0];
-        const meta = fams.get(fam) || {};
-        const inCat = catalogue.workers.some((w) => w.agent_id === id);
-        let reason = "";
-        if (!inCat || !fams.has(fam)) {
-          reason = "the identity is missing from the new bundle";
-        } else if (disabled.has(fam)) {
-          reason = "the family is in disabled";
-        } else {
-          const cli = meta.cli || (prevW && prevW.cli) || ((catalogue.workers.find((w) => w.agent_id === id) || {}).cli);
-          if (cli && !present.has(cli)) {
-            reason = "the CLI is not on PATH";
-          }
+  if (beforeIds !== null && priorReal && currentReal) {
+    const marker = readTransition();
+    const skipComparison = Boolean(marker && marker.prior === priorReal && marker.current === currentReal);
+    if (!skipComparison) {
+      const afterIds = new Set(keep.map((w) => w.agent_id));
+      const added = [...afterIds].filter((id) => !beforeIds.has(id)).sort();
+      const removed = [...beforeIds].filter((id) => !afterIds.has(id)).sort();
+      if (added.length > 0 || removed.length > 0) {
+        console.log("  ! this update changed which workers are enabled:");
+        for (const id of added) {
+          console.log(`      + ${id}   (enabled now; was off)`);
         }
-        const suffix = reason ? `: ${reason}` : "";
-        console.log(`      - ${id}   (was enabled; now off${suffix})`);
+        for (const id of removed) {
+          const prevW = prevWorkersMap.get(id);
+          const fam = (prevW && familyOf(prevW)) || id.split("@")[0];
+          const meta = fams.get(fam) || {};
+          const inCat = catalogue.workers.some((w) => w.agent_id === id);
+          let reason = "";
+          if (!inCat || !fams.has(fam)) {
+            reason = "the identity is missing from the new bundle";
+          } else if (disabled.has(fam)) {
+            reason = "the family is in disabled";
+          } else {
+            const cli = meta.cli || (prevW && prevW.cli) || ((catalogue.workers.find((w) => w.agent_id === id) || {}).cli);
+            if (cli && !present.has(cli)) {
+              reason = "the CLI is not on PATH";
+            }
+          }
+          const suffix = reason ? `: ${reason}` : "";
+          console.log(`      - ${id}   (was enabled; now off${suffix})`);
+        }
+        console.log("    keep a worker off for good: datacore worker remove <family>; turn one back on: datacore worker add <id>");
       }
-      console.log("    keep a worker off for good: datacore worker remove <family>; turn one back on: datacore worker add <id>");
+      writeTransition(priorReal, currentReal);
     }
   }
 
@@ -1015,6 +1068,7 @@ DATACORE_REGISTRY_JS
   # Choices live outside the bundle; old registries are migration input only when no choices
   # file exists. Pass paths by environment because prune's remaining arguments name CLIs.
   DATACORE_WORKER_STATE="$WORKER_STATE" \
+  DATACORE_WORKER_TRANSITION="$WORKER_TRANSITION" \
   DATACORE_WORKER_PRIOR_REGISTRY="$RUNTIME_REGISTRY" \
   DATACORE_WORKER_VERSIONS_DIR="$ROOT/versions" \
   DATACORE_WORKER_CURRENT_BUNDLE="$(cd "$ROOT/current" 2>/dev/null && pwd -P || true)" \
