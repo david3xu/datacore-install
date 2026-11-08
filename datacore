@@ -148,8 +148,33 @@ case "$verb" in
   logs)      run_bundle_script logs      tail-datacore-local.sh      "$@" ;;
   start)     run_bundle_script start     start-datacore-local.sh     "$@" ;;
   stop)      run_bundle_script stop      stop-datacore-local.sh      "$@" ;;
-  backup)    run_bundle_script backup    backup-datacore-local.sh    "$@" ;;
-  restore)   run_bundle_script restore   restore-datacore-local.sh   "$@" ;;
+  backup)
+    case "${1:-}" in
+      -h|--help)
+        cat <<'EOF'
+Usage: datacore backup [archive-path]
+
+Stops the Datacore services, writes a .tar.gz of the data directory
+(default: <install>/current/backups/datacore-local-backup-<timestamp>.tar.gz)
+and restarts the services that were running. Note that bundles before
+0.1.84 leave the services stopped; run `datacore start` afterwards.
+EOF
+        exit 0
+        ;;
+    esac
+    run_bundle_script backup    backup-datacore-local.sh    "$@"
+    ;;
+  restore)
+    case "${1:-}" in
+      -h|--help)
+        cat <<'EOF'
+Usage: datacore restore <archive-path>
+EOF
+        exit 0
+        ;;
+    esac
+    run_bundle_script restore   restore-datacore-local.sh   "$@"
+    ;;
   update)    run_installer "$@" ;;
   uninstall) run_lib_script uninstall.sh "$@" ;;
 

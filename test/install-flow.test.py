@@ -330,6 +330,42 @@ class InstallFlowTests(unittest.TestCase):
         self.assertIn("datacore worker add", result.stdout)
         self.assertNotIn("no worker CLI installed", result.stdout)
 
+    def run_upgrade_flow(self, env_content):
+        bundle = self.home / "bundle"
+        bundle.mkdir(parents=True, exist_ok=True)
+        prev = self.home / "prev"
+        prev.mkdir(parents=True, exist_ok=True)
+        if env_content is not None:
+            (bundle / ".env").write_text(env_content)
+        return shell(
+            "ok() { :; }; info() { :; }; warn() { :; }; die() { exit 1; }\n"
+            "PROJECTS_MAPPED=0\nPROJECTS_SUMMARY='not configured'\n"
+            "WORKERS_SUMMARY='left as generated'\nRUNTIME_URL='http://127.0.0.1:43123'\n"
+            "REGISTERED='Claude Code'\nB=''; R=''\n" +
+            function("prepare_env") + "\n" +
+            function("summarise_projects") + "\n" +
+            function("print_summary") + "\n" +
+            f"BUNDLE_DIR={shlex.quote(str(bundle))}\nPREVIOUS_DIR={shlex.quote(str(prev))}\n"
+            "prepare_env\nsummarise_projects\nprint_summary",
+            self.home,
+        )
+
+    def test_upgrade_with_real_project_mapping_reports_mapped(self):
+        result = self.run_upgrade_flow(
+            'DATACORE_WORKER_PROJECT_WORKSPACES=\'{"my-project":"/home/user/repo"}\'\n'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Projects   mapped (see: datacore project list)", result.stdout)
+        self.assertIn("Next:  restart Claude Code", result.stdout)
+
+    def test_upgrade_with_unconfigured_standin_reports_none_mapped(self):
+        result = self.run_upgrade_flow(
+            'DATACORE_WORKER_PROJECT_WORKSPACES=\'{"_unconfigured":"/path/to/workspaces/_unconfigured"}\'\n'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Projects   none mapped — nothing can be dispatched yet", result.stdout)
+        self.assertIn("Next:  datacore project link", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

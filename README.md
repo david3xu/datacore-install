@@ -76,7 +76,7 @@ Nothing is hand-edited. You will not be asked to open a file in an editor.
 ## After installing
 
 ```
-✓ Datacore 0.1.80 is running
+✓ Datacore 0.1.83 is running
 
   Runtime    http://127.0.0.1:43123
   MCP        Claude Code

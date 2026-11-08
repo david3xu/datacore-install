@@ -1,7 +1,8 @@
 #!/bin/sh
 # Datacore installer.
 #
-# Usage:  curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/v0.1.84/install.sh | sh
+# Usage:  curl -fsSL https://raw.githubusercontent.com/david3xu/datacore-install/main/install.sh | sh
+#         (a pinned tag URL also works: .../<tag>/install.sh)
 #
 # Environment overrides:
 #   DATACORE_VERSION        version to install (default: the release this installer ships with,
@@ -1055,24 +1056,41 @@ install_login_agent() {
   fi
 }
 
-# ---------------------------------------------------------------- main
+# ---------------------------------------------------------------- summary
 
-main() {
-  say ""; say "${B}Installing Datacore${R}"
-  step "Checking your machine";      detect_platform; ensure_container_runtime; ensure_bun
-  step "Downloading";                download_and_verify
-  step "Licence";                    accept_eula
-  step "Installing the command";     install_command
-  step "Configuring";                prepare_env
-  if [ "${DATACORE_SKIP_START:-0}" = 1 ]; then
-    step "Starting"; info "skipped (DATACORE_SKIP_START)"; RUNTIME_URL="(not started)"
+summarise_projects() {
+  _ws_env="${BUNDLE_DIR:-}/.env"
+  [ -n "${BUNDLE_DIR:-}" ] && [ -f "$_ws_env" ] || return 0
+  _ws_placeholder_key=_unconfigured
+  _ws_found=''
+  while IFS= read -r _ws_line; do
+    [ -n "$_ws_line" ] || continue
+    _ws_val=${_ws_line#*=}
+    _ws_val=$(printf '%s' "$_ws_val" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    case "$_ws_val" in
+      \'*\') _ws_val=$(printf '%s' "$_ws_val" | sed "s/^'//; s/'\$//") ;;
+      '"'*'"') _ws_val=$(printf '%s' "$_ws_val" | sed 's/^"//; s/"$//') ;;
+    esac
+    case "$_ws_val" in
+      ''|'{}') ;;
+      *'"'"$_ws_placeholder_key"'"'*) ;;
+      *'"default":"'"$HOME"'"'*) ;;
+      *) _ws_found="$_ws_val" ;;
+    esac
+  done <<WS_COPIES
+$(grep '^DATACORE_WORKER_PROJECT_WORKSPACES=' "$_ws_env" 2>/dev/null || true)
+WS_COPIES
+
+  if [ -n "$_ws_found" ]; then
+    PROJECTS_MAPPED=1
+    PROJECTS_SUMMARY="mapped (see: datacore project list)"
   else
-    step "Starting"; start_stack
+    PROJECTS_MAPPED=0
+    PROJECTS_SUMMARY="none mapped — nothing can be dispatched yet"
   fi
-  step "Workers";                    lean_workers
-  step "Connecting your AI clients"; register_clients
-  step "Finishing";                  install_login_agent
+}
 
+print_summary() {
   ver=$(basename "$BUNDLE_DIR" | sed 's/^datacore-local-edition-//')
 
   # A worker is dispatched into the repository its project is mapped to, and an unmapped project
@@ -1101,6 +1119,28 @@ ${B}✓ Datacore $ver is running${R}
   Later: datacore worker list    (see them), datacore worker add <name>    (enable more)
 
 EOF
+}
+
+# ---------------------------------------------------------------- main
+
+main() {
+  say ""; say "${B}Installing Datacore${R}"
+  step "Checking your machine";      detect_platform; ensure_container_runtime; ensure_bun
+  step "Downloading";                download_and_verify
+  step "Licence";                    accept_eula
+  step "Installing the command";     install_command
+  step "Configuring";                prepare_env
+  if [ "${DATACORE_SKIP_START:-0}" = 1 ]; then
+    step "Starting"; info "skipped (DATACORE_SKIP_START)"; RUNTIME_URL="(not started)"
+  else
+    step "Starting"; start_stack
+  fi
+  step "Workers";                    lean_workers
+  step "Connecting your AI clients"; register_clients
+  step "Finishing";                  install_login_agent
+
+  summarise_projects
+  print_summary
 }
 
 main "$@"
